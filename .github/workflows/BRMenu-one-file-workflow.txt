@@ -1,0 +1,82 @@
+name: Build and test iOS menu
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ios-menu-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unpack embedded menu source
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          import base64, io, zipfile
+          payload = "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"
+          with zipfile.ZipFile(io.BytesIO(base64.b64decode(payload))) as archive:
+              archive.extractall('.')
+          PYCODE
+      - name: Tool versions
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+      - name: Install project generator
+        run: |
+          if ! command -v xcodegen >/dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen --version
+      - name: Generate Xcode project
+        run: xcodegen generate --spec project.yml
+      - name: Build for iPhone (unsigned)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          xcodebuild -project BRMenu.xcodeproj -scheme BRMenuDemo \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/device CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            build 2>&1 | tee dist/device-build.log
+      - name: Package iPhone outputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          products=build/device/Build/Products/Release-iphoneos
+          test -f "$products/BRMenuDemo.app/BRMenuDemo"
+          test -f "$products/DiagnosticMenu.framework/DiagnosticMenu"
+          file "$products/DiagnosticMenu.framework/DiagnosticMenu" | tee dist/binary-info.txt
+          xcrun lipo -info "$products/DiagnosticMenu.framework/DiagnosticMenu" >> dist/binary-info.txt
+          mkdir -p dist/staging/Payload
+          ditto "$products/BRMenuDemo.app" dist/staging/Payload/BRMenuDemo.app
+          (cd dist/staging && zip -qry ../BRMenuDemo-unsigned.ipa Payload)
+          ditto -c -k --keepParent "$products/DiagnosticMenu.framework" dist/DiagnosticMenu-iphoneos.framework.zip
+          rm -r dist/staging
+          shasum -a 256 dist/BRMenuDemo-unsigned.ipa dist/DiagnosticMenu-iphoneos.framework.zip > dist/SHA256SUMS.txt
+      - name: Select an iPhone simulator
+        run: |
+          xcrun simctl list devices available --json > /tmp/brmenu-simulators.json
+          python3 scripts/select_simulator.py /tmp/brmenu-simulators.json >> "$GITHUB_ENV"
+      - name: Run menu UI test
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -project BRMenu.xcodeproj -scheme BRMenuDemo \
+            -configuration Debug -destination "platform=iOS Simulator,id=$BRMENU_SIMULATOR_ID" \
+            -derivedDataPath build/simulator -resultBundlePath dist/MenuTests.xcresult \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO test 2>&1 | tee dist/simulator-test.log
+      - name: Upload outputs and diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BRMenu-iOS-${{ github.run_number }}
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 7
