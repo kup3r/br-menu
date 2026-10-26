@@ -177,8 +177,8 @@ struct PedFlagBackup {uint64_t ped=0,local=0;uint16_t id=0;std::array<uint8_t,3>
 PedFlagBackup pedFlags;
 void updatePedFlags(const Local &s) {
     if(pedFlags.ped&&(pedFlags.ped!=s.ped||pedFlags.local!=s.local||pedFlags.id!=s.id))pedFlags={};
-    bool collision=assists.noCollision||(assists.noClip&&flight.active);
     float hp=0;const bool alive=read(s.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0;
+    bool collision=alive&&(assists.noCollision||(assists.noClip&&flight.active));
     bool protection=assists.proof&&alive,fall=assists.noFall&&alive;
     if(!collision&&!protection&&!fall&&!pedFlags.ped)return;
     if(!anchorAt(s.base,0x15c4d0,0x39423029U)||!sameLocal(s))return;
@@ -734,7 +734,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
             if(old.active&&s.ped==old.ped&&s.local==old.local) (void)teleport(s,old.point);
             (void)restoreMass(s,pedMass,s.ped);(void)restoreMass(s,vehicleMass,s.vehicle);
             (void)restoreGravity(s,pedGravity);(void)restoreGravity(s,carGravity);
-        } else {restoreSpread();animationState={};pedMass={};vehicleMass={};pedFlags={};restoreVehicleGuard();Local empty{};(void)restoreGravity(empty,carGravity);pedGravity={};}
+        } else {restoreSpread();pedMass={};vehicleMass={};pedFlags={};restoreVehicleGuard();Local empty{};(void)restoreGravity(empty,carGravity);pedGravity={};}
     }
 }
 + (void)configureControls:(NSDictionary<NSString *,NSNumber *> *)settings {
