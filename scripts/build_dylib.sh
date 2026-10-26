@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 mkdir -p build/inject dist
-license_flags=()
+license_flags=(-D BRMENU_UNLICENSED)
 license_sources=(Inject/LicenseGate.swift)
 if [[ "${BRMENU_LICENSED:-0}" == "1" ]]; then
   python3 scripts/license_config.py build/inject/LicenseConfiguration.swift
