@@ -308,7 +308,7 @@ void updateSpread(const Local &s) {
 }
 // RenderWare association speed (+34) is consumed by 5a34 and current time by 5a60.
 // Pause/speed changes affect playback, not server tasks or animation permissions.
-struct AnimationBackup {uint64_t association=0,hierarchy=0;int16_t id=0;float original=1,last=1;};
+struct AnimationBackup {uint64_t association=0,hierarchy=0;int16_t id=0;float original=1,last=1;bool playing=false,paused=false;};
 struct AnimationState {uint64_t ped=0,local=0,clump=0;uint16_t id=0;std::vector<AnimationBackup> entries;};
 AnimationState animationState;
 void updateAnimations(const Local &s) {
@@ -320,16 +320,29 @@ void updateAnimations(const Local &s) {
     const bool enabled=hp>0&&(assists.noAnim||assists.fastAnim);
     std::vector<AnimationBackup> next;std::unordered_set<uint64_t> seen;
     for(int i=0;i<64&&node&&seen.insert(node).second;++i) {
-        uint64_t link=0,hierarchy=0;int16_t id=0;float speed=0;
-        if(!read(node,link)||!read(node+0x20,hierarchy)||!hierarchy||!read(node+0x40,id)||!read(node+0x34,speed)||
+        uint64_t link=0,hierarchy=0;int16_t id=0;uint16_t flags=0;float speed=0;
+        if(!read(node,link)||!read(node+0x20,hierarchy)||!hierarchy||!read(node+0x40,id)||!read(node+0x42,flags)||!read(node+0x34,speed)||
            !std::isfinite(speed)||speed<0||speed>32)break;
         auto found=std::find_if(animationState.entries.begin(),animationState.entries.end(),[&](const AnimationBackup &a){return a.association==node&&a.hierarchy==hierarchy&&a.id==id;});
-        AnimationBackup entry{node,hierarchy,id,speed,speed};
+        AnimationBackup entry{node,hierarchy,id,speed,speed,bool(flags&1),false};
         if(found!=animationState.entries.end()) {entry=*found;if(speed!=entry.last)entry.original=speed;}
+        // Synced associations (flag 5) do not consume +34; flag 0 gates both
+        // time-step production and advancement, so pause it independently.
+        if(enabled&&assists.noAnim) {
+            if(!entry.paused)entry.playing=bool(flags&1);
+            uint16_t stopped=uint16_t(flags&~1U);
+            if(!writeData(node+0x42,stopped)){node=link;continue;}
+            entry.paused=true;
+        } else if(entry.paused) {
+            uint16_t restored=uint16_t((flags&~1U)|(entry.playing?1U:0U));
+            if(!writeData(node+0x42,restored)){next.push_back(entry);node=link;continue;}
+            entry.paused=false;
+        }
         if(enabled) {
             const float desired=assists.noAnim?0.f:std::min(32.f,float(entry.original*assists.animationRate));
-            if(writeData(node+0x34,desired)){entry.last=desired;next.push_back(entry);}
-        } else if(found!=animationState.entries.end()&&speed==entry.last)(void)writeData(node+0x34,entry.original);
+            if(writeData(node+0x34,desired))entry.last=desired;
+            next.push_back(entry);
+        } else if(found!=animationState.entries.end()&&speed==entry.last&&!writeData(node+0x34,entry.original))next.push_back(entry);
         node=link;
     }
     animationState={s.ped,s.local,clump,s.id,std::move(next)};

@@ -12,7 +12,9 @@ Added for the client UUID 855846c3-4f72-3770-b811-dd7fbe68b0db only:
   actors in this client may also lose dispersion. Registry identity is checked
   before restoration. No network ownership or damage permissions change.
 - NoAnim pauses local RenderWare association playback. Fast Anim changes speed
-  1–4x. NoAnim takes precedence. Only the current local clump is traversed, with
+  1–4x. NoAnim takes precedence and also clears association playing bit 0, which gates
+  synchronized playback. Fast Anim changes ordinary association speed; synchronized
+  associations may ignore its multiplier. Only the current local clump is traversed, with
   a 64-node limit, cycle detection and association identity checks. Removed nodes
   are never restored through stale pointers. Death releases animation modifiers.
   These controls do not cancel server tasks or promise server animation skips.

@@ -1005,7 +1005,7 @@ private final class MenuController: UIViewController {
             animationLabel.text = String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate); self?.onChange?()
         }, for: .valueChanged)
         pages[4].addArrangedSubview(animationLabel); pages[4].addArrangedSubview(animationRate)
-        pages[4].addArrangedSubview(note("NoAnim имеет приоритет. Управление воспроизведением, без отмены задач сервера. При выключении исходная скорость восстанавливается."))
+        pages[4].addArrangedSubview(note("NoAnim имеет приоритет. Управление воспроизведением, без отмены задач сервера. Синхронизированные анимации могут игнорировать Fast Anim. При выключении исходная скорость восстанавливается."))
         pages[4].addArrangedSubview(button("Сменить скин по ID", "skinSet"))
         pages[4].addArrangedSubview(button("Вернуть исходный скин", "skinRestore"))
         pages[4].addArrangedSubview(button("Выключить игровые функции", "resetControls"))

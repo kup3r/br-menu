@@ -44,11 +44,11 @@ int main(){
  uint64_t clump=0x500000,data=0x600000,node=0x700000;
  writeData(s.ped+0x68,clump);writeData(clump,uint8_t(2));writeData(s.base+0x2118bc0,int32_t(0x100));
  writeData(clump+0x100,data);writeData(data,node);writeData(node,uint64_t(0));
- writeData(node+0x20,uint64_t(0x800000));writeData(node+0x40,int16_t(17));writeData(node+0x34,1.f);writeData(s.ped+0x4b0,100.f);
+ writeData(node+0x20,uint64_t(0x800000));writeData(node+0x40,int16_t(17));writeData(node+0x42,uint16_t(0x21));writeData(node+0x34,1.f);writeData(s.ped+0x4b0,100.f);
  assists.fastAnim=true;updateAnimations(s);assert(value<float>(node+0x34)==2);
  updateAnimations(s);assert(value<float>(node+0x34)==2); // no multiplier accumulation
- assists.noAnim=true;updateAnimations(s);assert(value<float>(node+0x34)==0);
- assists.noAnim=false;assists.fastAnim=false;updateAnimations(s);assert(value<float>(node+0x34)==1);
+ assists.noAnim=true;updateAnimations(s);assert(value<float>(node+0x34)==0);assert(value<uint16_t>(node+0x42)==0x20);
+ assists.noAnim=false;assists.fastAnim=false;updateAnimations(s);assert(value<float>(node+0x34)==1);assert(value<uint16_t>(node+0x42)==0x21);
  assists.fastAnim=true;updateAnimations(s);writeData(node+0x34,.5f);updateAnimations(s);
  assert(value<float>(node+0x34)==1);assists.fastAnim=false;updateAnimations(s);assert(value<float>(node+0x34)==.5f);
  assists.noAnim=true;updateAnimations(s);writeData(s.ped+0x4b0,0.f);updateAnimations(s);
