@@ -182,8 +182,8 @@ public final class DiagnosticMenu: NSObject {
         let area = CGRect(x: insets.left + 12, y: topInset + 12,
                           width: max(58, bounds.width - insets.left - insets.right - 24),
                           height: max(58, bounds.height - topInset - insets.bottom - 24))
-        let width = host.collapsed ? 58.0 : min(MenuPreferences.shared.large ? 360.0 : 304.0, area.width)
-        let height = host.collapsed ? 58.0 : min(440.0, area.height)
+        let width = host.collapsed ? 58.0 : min(MenuPreferences.shared.large ? 420.0 : 350.0, area.width)
+        let height = host.collapsed ? 58.0 : min(520.0, area.height)
         let defaultX = host.rightSide ? area.maxX - width : area.minX
         let desired = dragOrigin ?? CGPoint(x: defaultX, y: area.minY)
         let x = min(max(area.minX, desired.x), area.maxX - width)
@@ -365,7 +365,7 @@ public final class DiagnosticMenu: NSObject {
         case "skinSet", "carSet", "weaponGive": requestAppearance(action)
         case "skinRestore", "carRestore", "modelCancel": runGame(action, [:])
         case "nearestVehicle": runGame("nearestVehicle", [:])
-        case "ammoRefill", "magazineFill", "repairVehicle", "gravityReset": runGame(action, [:])
+        case "ammoRefill", "magazineFill", "repairVehicle", "gravityReset", "unlockVehicle", "startEngine", "respawn": runGame(action, [:])
         case "gravityPed", "gravityVehicle": runGame(action, ["factor": MenuPreferences.shared.gravityFactor])
         case "resetControls":
             MenuPreferences.shared.stretch = 1; host.resetStretch(); restoreStretch()
@@ -374,6 +374,9 @@ public final class DiagnosticMenu: NSObject {
             controlStopProvider?(); host.syncControlToggles(); configureControls()
             host.actionStatus.text = "Игровые переключатели выключены"; append("Игровые переключатели выключены")
         case "hop": runGame("hop", ["power": MenuPreferences.shared.hopPower])
+        case "suicide":
+            for key in ["autoHealth", "localProof", "noFall", "noAnim", "fastAnim"] { MenuPreferences.shared.set(key, false) }
+            host.syncControlToggles(); configureControls(); runGame(action, [:])
         case "heal", "armor", "healVehicle": runGame(action, [:])
         case "dash": runGame("dash", ["power": MenuPreferences.shared.hopPower])
         case "stopVehicle": runGame("stopVehicle", [:])
@@ -388,6 +391,7 @@ public final class DiagnosticMenu: NSObject {
     private func configureControls() {
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
         values["fireRate"] = MenuPreferences.shared.fireRate
+        values["animationRate"] = MenuPreferences.shared.animationRate
         controlConfigurationProvider?(values)
         aspectConfigurationProvider?(MenuPreferences.shared.stretch)
         let prefs = MenuPreferences.shared
@@ -493,7 +497,7 @@ public final class DiagnosticMenu: NSObject {
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire"]
+    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
@@ -504,6 +508,10 @@ private final class MenuPreferences {
     var maxDistance: Double {
         get { defaults.object(forKey: "espDistance") == nil ? 150 : max(25, min(500, defaults.double(forKey: "espDistance"))) }
         set { defaults.set(newValue, forKey: "espDistance") }
+    }
+    var animationRate: Double {
+        get { defaults.object(forKey: "animationRate") == nil ? 2 : max(1, min(4, defaults.double(forKey: "animationRate"))) }
+        set { defaults.set(newValue, forKey: "animationRate") }
     }
     var fireRate: Double {
         get { defaults.object(forKey: "fireRate") == nil ? 2 : max(1, min(5, defaults.double(forKey: "fireRate"))) }
@@ -786,7 +794,10 @@ private final class DiagnosticDecor: UIView {
 private final class MenuController: UIViewController {
     let metrics = UILabel(), coordinates = UILabel(), espStatus = UILabel(), flightStatus = UILabel(), actionStatus = UILabel(), selfStatus = UILabel(), weaponStatus = UILabel(), carStatus = UILabel(), log = UITextView()
     private let content = UIStackView(), bubble = UIButton(type: .system)
-    private let tabs = UISegmentedControl(items: ["Обзор", "ESP", "Движ.", "Авто", "Я", "Оруж.", "Aim", "⚙︎"])
+    private let categoryGrid = UIStackView(), navigation = UIStackView(), pageTitle = UILabel()
+    private let scroll = UIScrollView()
+    private var selectedPage: Int? = nil
+    private let categoryTitles = ["Диагностика", "ESP и визуалы", "Движение", "Транспорт", "Персонаж", "Оружие", "Silent Aim", "Настройки"]
     private let pages = (0..<8).map { _ in UIStackView() }
     private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     var messages: [String] = []
@@ -819,15 +830,18 @@ private final class MenuController: UIViewController {
         header.addArrangedSubview(title)
         let collapse = button("−", "collapse"); collapse.widthAnchor.constraint(equalToConstant: 40).isActive = true
         header.addArrangedSubview(collapse); layout.addArrangedSubview(header)
-        tabs.selectedSegmentIndex = 0; tabs.setTitleTextAttributes([.font: UIFont.systemFont(ofSize: 9)], for: .normal)
-        tabs.accessibilityIdentifier = "diagnostics.tabs"
-        tabs.addAction(UIAction { [weak self] _ in self?.selectPage() }, for: .valueChanged)
-        layout.addArrangedSubview(tabs)
-        actionStatus.numberOfLines = 2; actionStatus.font = .systemFont(ofSize: 10)
-        actionStatus.textColor = .systemOrange; actionStatus.text = "v17 · новые действия требуют проверки в игре"
+        let home = button("‹ Разделы", "home")
+        home.addAction(UIAction { [weak self] _ in self?.showPage(nil) }, for: .touchUpInside)
+        navigation.axis = .horizontal; navigation.spacing = 10; navigation.alignment = .center
+        pageTitle.font = .boldSystemFont(ofSize: 16); pageTitle.textColor = .white
+        pageTitle.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        navigation.addArrangedSubview(home); navigation.addArrangedSubview(pageTitle)
+        layout.addArrangedSubview(navigation)
+        actionStatus.numberOfLines = 2; actionStatus.font = .systemFont(ofSize: 12)
+        actionStatus.textColor = .systemOrange; actionStatus.text = "v18 · выбери раздел"
         actionStatus.accessibilityIdentifier = "diagnostics.actionStatus"
         layout.addArrangedSubview(actionStatus)
-        let scroll = UIScrollView(); scroll.alwaysBounceVertical = true
+        scroll.alwaysBounceVertical = true
         layout.addArrangedSubview(scroll)
         content.axis = .vertical; content.spacing = 12; content.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(content)
@@ -836,6 +850,27 @@ private final class MenuController: UIViewController {
             content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
             content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor)
         ])
+        categoryGrid.axis = .vertical; categoryGrid.spacing = 10
+        let symbols = ["waveform.path.ecg", "eye", "figure.walk", "car.fill", "person.fill", "scope", "dot.scope", "slider.horizontal.3"]
+        // A two-column home replaces eight small, hard-to-hit segments.
+        for pair in [[4, 2], [3, 5], [1, 6], [7, 0]] {
+            let row = UIStackView(); row.spacing = 10; row.distribution = .fillEqually
+            for index in pair {
+                let b = UIButton(type: .system)
+                var config = UIButton.Configuration.tinted(); config.title = categoryTitles[index]
+                config.image = UIImage(systemName: symbols[index]); config.imagePlacement = .top; config.imagePadding = 8
+                config.baseForegroundColor = MenuPreferences.shared.accent; config.cornerStyle = .large
+                config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                    var result = attributes; result.font = .systemFont(ofSize: 14, weight: .semibold); return result
+                }
+                b.configuration = config; b.heightAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+                b.accessibilityIdentifier = "diagnostics.category.\(index)"
+                b.addAction(UIAction { [weak self] _ in self?.showPage(index) }, for: .touchUpInside)
+                row.addArrangedSubview(b)
+            }
+            categoryGrid.addArrangedSubview(row)
+        }
+        content.addArrangedSubview(categoryGrid)
         for page in pages { page.axis = .vertical; page.spacing = 12; content.addArrangedSubview(page) }
         metrics.numberOfLines = 0; metrics.font = .monospacedSystemFont(ofSize: 12, weight: .medium); metrics.textColor = .white
         pages[0].addArrangedSubview(metrics)
@@ -882,7 +917,9 @@ private final class MenuController: UIViewController {
         pages[2].addArrangedSubview(note("Экспериментальные локальные действия · 1.99.0. Результат в игре ещё нужно проверить."))
         flightStatus.text = "AirBrake выключен"; flightStatus.font = .systemFont(ofSize: 11); flightStatus.textColor = .systemOrange
         pages[2].addArrangedSubview(flightStatus)
-        pages[2].addArrangedSubview(toggle("NoClip в AirBrake", key: "noClip"))
+        pages[2].addArrangedSubview(toggle("No Collision · без столкновений", key: "noCollision"))
+        pages[2].addArrangedSubview(note("Для персонажа пешком. Отключай в свободном месте; сервер может исправить положение."))
+        pages[2].addArrangedSubview(toggle("NoClip только в AirBrake", key: "noClip"))
         pages[2].addArrangedSubview(button("AirBrake · включить / выключить", "flightToggle"))
         let flightSpeed = UISlider(); flightSpeed.minimumValue = 1; flightSpeed.maximumValue = 30; flightSpeed.value = Float(MenuPreferences.shared.flightSpeed)
         flightSpeed.accessibilityLabel = "Скорость AirBrake"
@@ -930,6 +967,9 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(note("Доступно после посадки в транспорт. Серверная синхронизация может изменить результат."))
         carStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); carStatus.textColor = .systemCyan; carStatus.numberOfLines = 0
         pages[3].addArrangedSubview(carStatus)
+        pages[3].addArrangedSubview(button("Bypass Lock · открыть ближайшую машину", "unlockVehicle"))
+        pages[3].addArrangedSubview(button("Drive Without Key · запустить двигатель", "startEngine"))
+        pages[3].addArrangedSubview(note("Замок — рядом до 8 м. Двигатель — за рулём. Меняется состояние клиента; серверные ключи и права не выдаются."))
         pages[3].addArrangedSubview(button("Подменить модель машины по ID", "carSet"))
         pages[3].addArrangedSubview(button("Вернуть исходную модель машины", "carRestore"))
         pages[3].addArrangedSubview(button("Остановить транспорт", "stopVehicle"))
@@ -949,9 +989,23 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
         pages[3].addArrangedSubview(button("Применить выбранную гравитацию к авто", "gravityVehicle"))
         pages[3].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
-        pages[3].addArrangedSubview(note("Защита действует в локальном обработчике урона; серверное бессмертие не гарантируется. Бесконечное нитро и обход замков не подключены."))
+        pages[3].addArrangedSubview(note("Защита действует в локальном обработчике урона; серверное бессмертие не гарантируется. Бесконечное нитро не подключено."))
         selfStatus.numberOfLines = 0; selfStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); selfStatus.textColor = .systemCyan
         pages[4].addArrangedSubview(selfStatus)
+        pages[4].addArrangedSubview(button("Suicide · завершить жизнь персонажа", "suicide"))
+        pages[4].addArrangedSubview(button("Fast Respawn · появиться снова", "respawn"))
+        pages[4].addArrangedSubview(note("Пешком, после завершения смерти. Используются сохранённые сервером данные появления; сервер может отклонить респаун."))
+        pages[4].addArrangedSubview(toggle("NoAnim · пауза локальной анимации", key: "noAnim"))
+        pages[4].addArrangedSubview(toggle("Fast Anim · ускоренные анимации", key: "fastAnim"))
+        let animationLabel = note(String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate))
+        let animationRate = UISlider(); animationRate.minimumValue = 1; animationRate.maximumValue = 4
+        animationRate.value = Float(MenuPreferences.shared.animationRate); animationRate.accessibilityIdentifier = "diagnostics.animationRate"
+        animationRate.addAction(UIAction { [weak self, weak animationRate] _ in
+            MenuPreferences.shared.animationRate = Double(animationRate?.value ?? 2)
+            animationLabel.text = String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate); self?.onChange?()
+        }, for: .valueChanged)
+        pages[4].addArrangedSubview(animationLabel); pages[4].addArrangedSubview(animationRate)
+        pages[4].addArrangedSubview(note("NoAnim имеет приоритет. Управление воспроизведением, без отмены задач сервера. При выключении исходная скорость восстанавливается."))
         pages[4].addArrangedSubview(button("Сменить скин по ID", "skinSet"))
         pages[4].addArrangedSubview(button("Вернуть исходный скин", "skinRestore"))
         pages[4].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
@@ -965,17 +1019,20 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(note("HP/броня удерживаются не ниже 100. Это локальное восстановление, а не гарантия бессмертия. Выносливость — проверка предполагаемого поля; сравни показания до и во время спринта."))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
+        pages[5].addArrangedSubview(note("No Recoil пока не подключён: отдельный обработчик отдачи камеры не подтверждён."))
+        pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
+        pages[5].addArrangedSubview(note("Убирает случайное отклонение пули. Параметры модели оружия общие внутри клиента; могут затронуть тот же тип у других персонажей локально. При выключении восстанавливаются."))
         pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
         pages[5].addArrangedSubview(note("Оружие выдаётся локально штатной функцией клиента. Стрельба использует обычное управление игры; серверные права не меняются."))
         pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
         pages[5].addArrangedSubview(button("Заполнить магазин из запаса", "magazineFill"))
         pages[5].addArrangedSubview(toggle("Бесконечный запас патронов", key: "infiniteAmmo"))
         pages[5].addArrangedSubview(toggle("Без перезарядки · эксперимент", key: "noReload"))
-        pages[5].addArrangedSubview(toggle("Сократить задержку выстрела", key: "rapidFire"))
-        pages[5].addArrangedSubview(note("Множитель скорострельности · 1–5"))
+        pages[5].addArrangedSubview(toggle("Rapid Fire · скорострельность", key: "rapidFire"))
+        let rateLabel = note(String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate)); pages[5].addArrangedSubview(rateLabel)
         let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 5; fireRate.value = Float(MenuPreferences.shared.fireRate)
         fireRate.accessibilityLabel = "Множитель скорострельности"
-        fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); self?.onChange?() }, for: .valueChanged)
+        fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
         pages[5].addArrangedSubview(note("Только поддерживаемое огнестрельное оружие. Изменяются локальные счётчики и таймер; анимация и сервер могут ограничивать результат. Silent Aim — во вкладке Aim, для него нужна копия IPA v15. Triggerbot не подключён."))
         pages[6].addArrangedSubview(toggle("Silent Aim · эксперимент", key: "silentAim"))
@@ -1042,14 +1099,15 @@ private final class MenuController: UIViewController {
         bubble.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
         bubble.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(bubble)
         NSLayoutConstraint.activate([bubble.leadingAnchor.constraint(equalTo: view.leadingAnchor), bubble.trailingAnchor.constraint(equalTo: view.trailingAnchor), bubble.topAnchor.constraint(equalTo: view.topAnchor), bubble.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
-        selectPage(); applyCollapse()
+        showPage(nil); applyCollapse()
     }
     private func note(_ text: String) -> UILabel {
-        let label = UILabel(); label.text = text; label.numberOfLines = 0; label.textColor = .secondaryLabel; label.font = .systemFont(ofSize: 11); return label
+        let label = UILabel(); label.text = text; label.numberOfLines = 0; label.textColor = .secondaryLabel; label.font = .systemFont(ofSize: 12); return label
     }
     private func toggle(_ title: String, key: String, fallback: Bool = false) -> UIView {
-        let row = UIStackView(); row.spacing = 8
-        let label = note(title); label.textColor = .white; label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let row = UIStackView(); row.spacing = 12; row.alignment = .center
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
+        let label = note(title); label.font = .systemFont(ofSize: 15, weight: .medium); label.textColor = .white; label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let control = UISwitch(); control.isOn = MenuPreferences.shared.flag(key, fallback: fallback)
         control.accessibilityIdentifier = "diagnostics.\(key)"; control.accessibilityLabel = title
         control.onTintColor = MenuPreferences.shared.accent
@@ -1070,13 +1128,23 @@ private final class MenuController: UIViewController {
         }
         visit(view)
     }
-    private func selectPage() { onAction?("flightRelease"); for (index, page) in pages.enumerated() { page.isHidden = index != tabs.selectedSegmentIndex } }
+    private func showPage(_ selected: Int?) {
+        onAction?("flightRelease"); selectedPage = selected
+        navigation.isHidden = selected == nil; categoryGrid.isHidden = selected != nil
+        pageTitle.text = selected.map { categoryTitles[$0] }
+        for (index, page) in pages.enumerated() { page.isHidden = index != selected }
+        scroll.setContentOffset(.zero, animated: false)
+        if MenuPreferences.shared.animations && !UIAccessibility.isReduceMotionEnabled {
+            content.alpha = 0; UIView.animate(withDuration: 0.18) { self.content.alpha = 1 }
+        }
+    }
     @objc private func drag(_ recognizer: UIPanGestureRecognizer) {
         onDrag?(recognizer.translation(in: view.superview)); recognizer.setTranslation(.zero, in: view.superview)
     }
     private func holdButton(_ title: String, _ action: String) -> UIButton {
         let b = UIButton(type: .system); b.accessibilityIdentifier = "diagnostics.\(action)"
         var config = UIButton.Configuration.tinted(); config.title = title; config.baseForegroundColor = MenuPreferences.shared.accent; b.configuration = config
+        b.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         b.isExclusiveTouch = true
         b.addAction(UIAction { [weak self] _ in self?.onAction?(action) }, for: .touchDown)
         b.addAction(UIAction { [weak self] _ in self?.onAction?("flightRelease") }, for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
@@ -1086,6 +1154,7 @@ private final class MenuController: UIViewController {
         let b = UIButton(type: .system); b.accessibilityIdentifier = "diagnostics.\(action)"
         var configuration = UIButton.Configuration.tinted(); configuration.title = title; configuration.cornerStyle = .medium
         configuration.baseForegroundColor = MenuPreferences.shared.accent; b.configuration = configuration
+        b.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
         b.addAction(UIAction { [weak self] _ in self?.onAction?(action) }, for: .touchUpInside); return b
     }
     func applyCollapse() {

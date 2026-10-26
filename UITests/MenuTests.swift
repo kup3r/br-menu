@@ -18,26 +18,33 @@ final class MenuTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(expand.frame.minY, 40, "BR must stay below the portrait status bar")
         expand.tap()
         XCTAssertTrue(collapse.waitForExistence(timeout: 5))
-        let tabs = app.segmentedControls["diagnostics.tabs"]
-        tabs.buttons["ESP"].tap()
-        let grid = app.switches["diagnostics.esp"]
-        XCTAssertTrue(grid.waitForExistence(timeout: 5))
-        let prior = grid.value as? String
-        grid.tap()
-        XCTAssertNotEqual(grid.value as? String, prior)
-        tabs.buttons["Авто"].tap()
-        XCTAssertTrue(app.buttons["diagnostics.stopVehicle"].waitForExistence(timeout: 5))
-        tabs.buttons["Оруж."].tap()
-        XCTAssertTrue(app.buttons["diagnostics.ammoRefill"].waitForExistence(timeout: 5))
-        tabs.buttons["Aim"].tap()
+        func open(_ index: Int) {
+            let home = app.buttons["diagnostics.home"]
+            if home.exists { home.tap() }
+            app.buttons["diagnostics.category.\(index)"].tap()
+        }
+        open(1)
+        let esp = app.switches["diagnostics.esp"]
+        XCTAssertTrue(esp.waitForExistence(timeout: 5)); let prior = esp.value as? String
+        esp.tap(); XCTAssertNotEqual(esp.value as? String, prior)
+        open(3)
+        XCTAssertTrue(app.buttons["diagnostics.unlockVehicle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["diagnostics.startEngine"].exists)
+        open(5)
+        XCTAssertTrue(app.switches["diagnostics.noSpread"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.switches["diagnostics.rapidFire"].exists)
+        open(4)
+        XCTAssertTrue(app.buttons["diagnostics.suicide"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["diagnostics.respawn"].exists)
+        XCTAssertTrue(app.switches["diagnostics.noAnim"].exists)
+        XCTAssertTrue(app.switches["diagnostics.fastAnim"].exists)
+        open(2)
+        XCTAssertTrue(app.switches["diagnostics.noCollision"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["diagnostics.flightToggle"].exists)
+        open(6)
         XCTAssertTrue(app.switches["diagnostics.silentAim"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["diagnostics.aimWhitelist"].exists)
-        tabs.buttons["⚙︎"].tap()
-        XCTAssertTrue(app.switches["diagnostics.animations"].waitForExistence(timeout: 5))
-        tabs.buttons["Движ."].tap()
-        XCTAssertTrue(app.buttons["diagnostics.flightToggle"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["diagnostics.waypoint"].exists)
-        XCTAssertTrue(app.buttons["diagnostics.waypointCancel"].exists)
-        tabs.buttons["Обзор"].tap()
+        open(7)
+        XCTAssertTrue(app.switches["diagnostics.animations"].exists)
+        open(0)
     }
 }

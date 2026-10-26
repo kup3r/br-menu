@@ -14,6 +14,7 @@
 #include <mutex>
 #include <unordered_set>
 #include <string>
+#include <vector>
 #include "AimMath.hpp"
 
 namespace {
@@ -77,7 +78,8 @@ Flight flight;
 struct Assists {
     bool health=false,armor=false,stamina=false,vehicleHealth=false,slowFall=false;
     bool noClip=false,proof=false,noFall=false,vehicleProof=false,ammo=false,magazine=false,rapid=false;
-    double fireRate=2;
+    bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false;
+    double fireRate=2,animationRate=2;
 };
 Assists assists;
 struct Local { uint64_t base=0,pool=0,local=0,ped=0,vehicle=0; uint16_t id=0; V3 position{},velocity{}; };
@@ -175,7 +177,7 @@ struct PedFlagBackup {uint64_t ped=0,local=0;uint16_t id=0;std::array<uint8_t,3>
 PedFlagBackup pedFlags;
 void updatePedFlags(const Local &s) {
     if(pedFlags.ped&&(pedFlags.ped!=s.ped||pedFlags.local!=s.local||pedFlags.id!=s.id))pedFlags={};
-    bool collision=assists.noClip&&flight.active;
+    bool collision=assists.noCollision||(assists.noClip&&flight.active);
     float hp=0;const bool alive=read(s.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0;
     bool protection=assists.proof&&alive,fall=assists.noFall&&alive;
     if(!collision&&!protection&&!fall&&!pedFlags.ped)return;
@@ -272,6 +274,65 @@ uint64_t weaponDefinition(uint64_t base,uint8_t id) {
         uint64_t next=0;if(!read(node+0x210,next)||next==node)return 0;node=next;
     }
     return 0;
+}
+// WeaponInfo axes are the random bullet dispersion amplitudes at b0bef0.
+// Definitions are shared locally. Never restore through a stale registry node.
+struct SpreadBackup {uint64_t base=0,info=0;uint8_t id=0;std::array<float,3> original{};};
+SpreadBackup spreadBackup;
+void restoreSpread() {
+    if(spreadBackup.info&&weaponDefinition(spreadBackup.base,spreadBackup.id)==spreadBackup.info) {
+        std::array<float,3> current{};
+        if(read(spreadBackup.info+0x44,current))for(size_t i=0;i<3;++i)
+            if(current[i]==0)(void)writeData(spreadBackup.info+0x44+i*4,spreadBackup.original[i]);
+    }
+    spreadBackup={};
+}
+void updateSpread(const Local &s) {
+    Weapon w{};
+    const bool active=assists.noSpread&&getWeapon(s,w)&&sameWeapon(s,w);
+    if(spreadBackup.info&&(!active||spreadBackup.info!=w.info||spreadBackup.base!=s.base))restoreSpread();
+    if(!active||!sameLocal(s))return;
+    if(!spreadBackup.info) {
+        std::array<float,3> values{};
+        if(!read(w.info+0x44,values))return;
+        for(float v:values)if(!std::isfinite(v)||std::abs(v)>100)return;
+        spreadBackup={s.base,w.info,w.id,values};
+    }
+    std::array<float,3> current{};
+    if(!read(w.info+0x44,current))return;
+    for(size_t i=0;i<3;++i)if(current[i]!=0) {
+        if(!std::isfinite(current[i])||std::abs(current[i])>100)return;
+        spreadBackup.original[i]=current[i];
+    }
+    const std::array<float,3> zero{};(void)writeData(w.info+0x44,zero);
+}
+// RenderWare association speed (+34) is consumed by 5a34 and current time by 5a60.
+// Pause/speed changes affect playback, not server tasks or animation permissions.
+struct AnimationBackup {uint64_t association=0,hierarchy=0;int16_t id=0;float original=1,last=1;};
+struct AnimationState {uint64_t ped=0,local=0,clump=0;uint16_t id=0;std::vector<AnimationBackup> entries;};
+AnimationState animationState;
+void updateAnimations(const Local &s) {
+    uint64_t clump=0,data=0,node=0;int32_t offset=0;uint8_t type=0;float hp=0;
+    if(!sameLocal(s)||!read(s.ped+0x68,clump)||!clump||!read(clump,type)||type!=2||
+       !read(s.base+0x2118bc0,offset)||offset<0||offset>0x10000||!read(clump+offset,data)||!data||!read(data,node)||
+       !read(s.ped+0x4b0,hp)||!std::isfinite(hp))return;
+    if(animationState.ped!=s.ped||animationState.local!=s.local||animationState.id!=s.id||animationState.clump!=clump)animationState={};
+    const bool enabled=hp>0&&(assists.noAnim||assists.fastAnim);
+    std::vector<AnimationBackup> next;std::unordered_set<uint64_t> seen;
+    for(int i=0;i<64&&node&&seen.insert(node).second;++i) {
+        uint64_t link=0,hierarchy=0;int16_t id=0;float speed=0;
+        if(!read(node,link)||!read(node+0x20,hierarchy)||!hierarchy||!read(node+0x40,id)||!read(node+0x34,speed)||
+           !std::isfinite(speed)||speed<0||speed>32)break;
+        auto found=std::find_if(animationState.entries.begin(),animationState.entries.end(),[&](const AnimationBackup &a){return a.association==node&&a.hierarchy==hierarchy&&a.id==id;});
+        AnimationBackup entry{node,hierarchy,id,speed,speed};
+        if(found!=animationState.entries.end()) {entry=*found;if(speed!=entry.last)entry.original=speed;}
+        if(enabled) {
+            const float desired=assists.noAnim?0.f:std::min(32.f,float(entry.original*assists.animationRate));
+            if(writeData(node+0x34,desired)){entry.last=desired;next.push_back(entry);}
+        } else if(found!=animationState.entries.end()&&speed==entry.last)(void)writeData(node+0x34,entry.original);
+        node=link;
+    }
+    animationState={s.ped,s.local,clump,s.id,std::move(next)};
 }
 bool hasWeaponSlot(const Local &s,uint8_t weapon,uint64_t definition,uint64_t &brain) {
     uint64_t begin=0,end=0,config=0,configEnd=0;uint8_t initialized=0,byGroup=0;
@@ -669,11 +730,11 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         const Flight old=flight;flight={};assists={};cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
-            updatePedFlags(s);restoreVehicleGuard();
+            updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
             if(old.active&&s.ped==old.ped&&s.local==old.local) (void)teleport(s,old.point);
             (void)restoreMass(s,pedMass,s.ped);(void)restoreMass(s,vehicleMass,s.vehicle);
             (void)restoreGravity(s,pedGravity);(void)restoreGravity(s,carGravity);
-        } else {pedMass={};vehicleMass={};pedFlags={};restoreVehicleGuard();Local empty{};(void)restoreGravity(empty,carGravity);pedGravity={};}
+        } else {restoreSpread();animationState={};pedMass={};vehicleMass={};pedFlags={};restoreVehicleGuard();Local empty{};(void)restoreGravity(empty,carGravity);pedGravity={};}
     }
 }
 + (void)configureControls:(NSDictionary<NSString *,NSNumber *> *)settings {
@@ -684,9 +745,13 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         assists.slowFall=settings[@"slowFall"].boolValue;assists.noClip=settings[@"noClip"].boolValue;
         assists.proof=settings[@"localProof"].boolValue;assists.noFall=settings[@"noFall"].boolValue;
         assists.vehicleProof=settings[@"vehicleProof"].boolValue;assists.ammo=settings[@"infiniteAmmo"].boolValue;
+        assists.noCollision=settings[@"noCollision"].boolValue;assists.noSpread=settings[@"noSpread"].boolValue;
+        assists.noAnim=settings[@"noAnim"].boolValue;assists.fastAnim=settings[@"fastAnim"].boolValue;
+        const double animationRate=settings[@"animationRate"].doubleValue;
+        assists.animationRate=std::isfinite(animationRate)?std::clamp(animationRate,1.0,4.0):2;
         assists.magazine=settings[@"noReload"].boolValue;assists.rapid=settings[@"rapidFire"].boolValue;
         const double rate=settings[@"fireRate"].doubleValue;assists.fireRate=std::isfinite(rate)?std::clamp(rate,1.0,5.0):2.0;
-        Local s;if(getLocal(s)){updatePedFlags(s);updateVehicleGuard(s);}
+        Local s;if(getLocal(s)){updatePedFlags(s);updateVehicleGuard(s);updateSpread(s);updateAnimations(s);}else if(!assists.noSpread)restoreSpread();
     }
 }
 + (void)tickControls:(double)elapsed {
@@ -696,10 +761,10 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         tickWaypoint();
         tickAimContext();
         if(!flight.active&&!assists.health&&!assists.armor&&!assists.stamina&&!assists.vehicleHealth&&!assists.slowFall&&
-           !assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
+           !assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
         Local s;
         if(!std::isfinite(elapsed)||elapsed<=0||elapsed>0.25||!getLocal(s)) {flight={};return;}
-        updatePedFlags(s);updateVehicleGuard(s);weaponAssists(s);
+        updatePedFlags(s);updateVehicleGuard(s);weaponAssists(s);updateSpread(s);updateAnimations(s);
         uint32_t pedAnchor=0,carAnchor=0,staminaAnchor=0;
         const bool pedVerified=read(s.base+0x9c394c,pedAnchor)&&pedAnchor==0xbd04b260U;
         const bool carVerified=read(s.base+0x943f04,carAnchor)&&carAnchor==0xbd039900U;
@@ -799,6 +864,54 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         }
         if(flight.active)return @"Сначала выключи AirBrake";
         if([action isEqualToString:@"modelCancel"]) {cancelModelPending();return @"Ожидающая подмена отменена";}
+        if([action isEqualToString:@"unlockVehicle"]||[action isEqualToString:@"startEngine"]) {
+            uint64_t car=s.vehicle;
+            if(!car&&[action isEqualToString:@"unlockVehicle"]) {
+                uint64_t pool=0;if(!read(s.base+0x340de20,pool)||!pool)return @"Транспорт ещё не загружен";
+                float best=64;
+                for(int i=0;i<2000;++i) {
+                    uint64_t net=0,v=0;V3 p{};
+                    if(!read(pool+uint64_t(i)*8,net)||!net||!read(net,v)||!v||!read(v+0x38,p)||!finite(p))continue;
+                    float d=(p.x-s.position.x)*(p.x-s.position.x)+(p.y-s.position.y)*(p.y-s.position.y)+(p.z-s.position.z)*(p.z-s.position.z);
+                    if(d<best){best=d;car=v;}
+                }
+            }
+            VehicleRef ref{};
+            if(!car||!vehicleRef(s.base,car,ref)||!liveVehicle(ref)||!sameLocal(s))return @"Нет подходящей машины рядом (до 8 м)";
+            if([action isEqualToString:@"unlockVehicle"]) {
+                // afc718 rejects door states 2/4/5/7; unlocked state 1 passes.
+                if(!anchorAt(s.base,0x944760,0xf9400008U)||!anchorAt(s.base,0xafc728,0xb943bc08U))return @"Замки: версия функции не совпадает";
+                using Set=void(*)(void *,uint32_t);reinterpret_cast<Set>(s.base+0x944760)(reinterpret_cast<void *>(ref.net),1);
+                lastAction=now;return @"Локальный замок открыт · сервер может закрыть снова";
+            }
+            uint64_t driver=0;float hp=0;
+            if(!s.vehicle||!read(car+0x2f0,driver)||driver!=s.ped)return @"Сначала сядь за руль";
+            if(!read(car+0x398,hp)||!std::isfinite(hp)||hp<=250)return @"Сначала отремонтируй двигатель";
+            if(!anchorAt(s.base,0x94477c,0xa9be4ff4U)||!anchorAt(s.base,0x9447fc,0xb903812aU))return @"Двигатель: версия функции не совпадает";
+            using Engine=void(*)(void *,uint32_t);reinterpret_cast<Engine>(s.base+0x94477c)(reinterpret_cast<void *>(ref.net),1);
+            lastAction=now;return @"Локальный двигатель включён · серверные ключи не выдаются";
+        }
+        if([action isEqualToString:@"suicide"]||[action isEqualToString:@"respawn"]) {
+            uint32_t state=0;uint64_t task=0,clump=0;float hp=0;
+            if(s.vehicle||!sameLocal(s)||!read(s.ped+0x494,state)||!read(s.ped+0x4b0,hp)||!std::isfinite(hp)||
+               !read(s.ped+0x798,task)||!task||!read(s.ped+0x68,clump)||!clump)return @"Действие доступно для загруженного персонажа пешком";
+            if([action isEqualToString:@"suicide"]) {
+                if(state==52||state==53||hp<=0)return @"Персонаж уже в состоянии смерти";
+                if(!anchorAt(s.base,0x99d4c0,0x6dbc23e9U)||!anchorAt(s.base,0x99d664,0xb904b29fU))return @"Функция смерти не прошла проверку";
+                flight={};assists.health=false;assists.proof=false;assists.noFall=false;assists.noAnim=false;assists.fastAnim=false;
+                updatePedFlags(s);updateAnimations(s);
+                using Die=void(*)(void *,uint32_t,float,float);
+                reinterpret_cast<Die>(s.base+0x99d4c0)(reinterpret_cast<void *>(s.ped),202,4.f,0.f);
+                lastAction=now;return @"Вызвана штатная смерть персонажа";
+            }
+            if(state!=53)return @"Дождись завершения смерти (DEAD)";
+            uint8_t spawnInfo=0;V3 point{};float heading=0;
+            if(!read(s.local+0x1d4,spawnInfo)||spawnInfo!=1||!read(s.local+0x1ac,point)||!destination(point)||
+               !read(s.local+0x1b8,heading)||!std::isfinite(heading))return @"Нет сохранённых данных появления от сервера";
+            if(!anchorAt(s.base,0x92cce8,0xd10603ffU)||!anchorAt(s.base,0x92cd10,0x39475008U))return @"Функция появления не прошла проверку";
+            using Spawn=void(*)(void *);reinterpret_cast<Spawn>(s.base+0x92cce8)(reinterpret_cast<void *>(s.local));
+            lastAction=now;return @"Вызван штатный респаун · сервер может отклонить";
+        }
         if([action isEqualToString:@"skinRestore"]) {
             if(skinOriginal.ped!=s.ped||skinOriginal.local!=s.local||skinOriginal.id!=s.id)return @"Исходный скин этого персонажа не сохранён";
             lastAction=now;return beginModelAction(s,ModelAction::Skin,skinOriginal.model);

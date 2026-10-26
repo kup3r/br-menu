@@ -1,4 +1,4 @@
-name: Build and test iOS menu v17
+name: Build and test iOS menu v18
 on:
   workflow_dispatch:
   push:
@@ -26,6 +26,8 @@ jobs:
           mkdir -p build dist
           xcrun clang++ -std=c++17 -O2 -Wall -Wextra -Werror scripts/aim_core_tests.cpp -o build/aim_core_tests
           build/aim_core_tests | tee dist/aim-core-tests.log
+      - name: Test native control backup and restoration
+        run: CXX=clang++ python3 scripts/control_state_tests.py
       - name: Build autoload menu dylib (unsigned)
         shell: bash
         run: |
