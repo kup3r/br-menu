@@ -1,0 +1,5 @@
+build/
+dist/
+Generated/
+*.xcodeproj/
+.DS_Store
