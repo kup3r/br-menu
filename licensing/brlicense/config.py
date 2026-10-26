@@ -27,7 +27,7 @@ class Settings:
         result = cls(required('DATABASE_URL'), required('BOT_TOKEN'),
             frozenset(int(x.strip()) for x in required('ADMIN_IDS').split(',')),
             required('WEBHOOK_SECRET'), required('KEY_PEPPER'), required('KEY_ENCRYPTION_KEY'),
-            required('PUBLIC_URL').rstrip('/'), required('SUPPORT_URL'), required('TERMS_TEXT'))
+            (os.environ.get('PUBLIC_URL') or os.environ.get('RENDER_EXTERNAL_URL') or required('PUBLIC_URL')).strip().rstrip('/'), required('SUPPORT_URL'), required('TERMS_TEXT'))
         if not result.admin_ids or any(x <= 0 for x in result.admin_ids):
             raise ValueError('ADMIN_IDS: нужны числовые Telegram ID')
         if min(len(result.webhook_secret), len(result.key_pepper)) < 32:

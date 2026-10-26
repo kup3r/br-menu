@@ -43,7 +43,7 @@ python scripts/generate_secrets.py
 | `BOT_TOKEN` | Токен из BotFather |
 | `ADMIN_IDS` | Твой числовой ID; несколько ID через запятую |
 | `DATABASE_URL` | PostgreSQL URL; Neon URL с `sslmode=require` поддерживается |
-| `PUBLIC_URL` | HTTPS-адрес этого сервиса без завершающего `/` |
+| `PUBLIC_URL` | HTTPS-адрес сервиса; на Render можно не задавать — используется `RENDER_EXTERNAL_URL` |
 | `SUPPORT_URL` | Ссылка на твою поддержку в Telegram |
 | `TERMS_TEXT` | Твои реальные условия: продукт, сроки, устройства, возвраты |
 | `WEBHOOK_SECRET` | Случайный секрет из генератора |
