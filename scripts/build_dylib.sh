@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 mkdir -p build/inject dist
+license_flags=()
+license_sources=(Inject/LicenseGate.swift)
+if [[ "${BRMENU_LICENSED:-0}" == "1" ]]; then
+  python3 scripts/license_config.py build/inject/LicenseConfiguration.swift
+  license_flags=(-D BRMENU_LICENSED)
+  license_sources+=(build/inject/LicenseConfiguration.swift)
+fi
 sdk_path="$(xcrun --sdk iphoneos --show-sdk-path)"
 xcrun --sdk iphoneos clang -arch arm64 -isysroot "$sdk_path" \
   -miphoneos-version-min=18.0 -fobjc-arc -fmodules \
@@ -10,8 +17,8 @@ xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "$sdk_path" \
   -c Inject/PlayerSnapshot.mm -o build/inject/PlayerSnapshot.o
 xcrun --sdk iphoneos swiftc -swift-version 5 -O -emit-library \
   -module-name BRMenuInject -import-objc-header Inject/PlayerSnapshot.h -target arm64-apple-ios18.0 -sdk "$sdk_path" \
-  Sources/DiagnosticMenu/DiagnosticMenu.swift Inject/BRMenuEntry.swift \
-  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework GLKit -framework QuartzCore \
+  Sources/DiagnosticMenu/DiagnosticMenu.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
+  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework GLKit -framework QuartzCore -framework Security \
   -Xlinker -u -Xlinker _BRMenuQueueHook15 -Xlinker -u -Xlinker _BRMenuAspectHook17 \
   -Xlinker -install_name -Xlinker '@rpath/BRMenuInject.dylib' \
   -o dist/BRMenuInject.dylib

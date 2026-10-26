@@ -5,6 +5,23 @@ import UIKit
 @MainActor
 public final class BRMenuEntry: NSObject {
     private static let coordinator = BRMenuEntry()
+    #if BRMENU_LICENSED
+    private var licenseAllowed = false
+    private lazy var licenseGate: LicenseGate = {
+        let gate = LicenseGate()
+        gate.onAccessChange = { [weak self] allowed in
+            guard let self else { return }
+            self.licenseAllowed = allowed
+            if allowed { self.attachActiveScenes() }
+            else {
+                for menu in self.menus.values { menu.uninstall() }
+                self.menus.removeAll(); BRPlayerSnapshot.stopControls()
+            }
+        }
+        return gate
+    }()
+    @objc private func licenseBackground() { licenseGate.suspend() }
+    #endif
     private var started = false
     private var menus: [String: DiagnosticMenu] = [:]
 
@@ -16,6 +33,9 @@ public final class BRMenuEntry: NSObject {
         NotificationCenter.default.addObserver(self, selector: #selector(sceneActive(_:)), name: UIScene.didActivateNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(sceneDisconnected(_:)), name: UIScene.didDisconnectNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        #if BRMENU_LICENSED
+        NotificationCenter.default.addObserver(self, selector: #selector(licenseBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        #endif
         NSLog("[BRMenu] dylib entry started")
         attachActiveScenes()
     }
@@ -39,6 +59,9 @@ public final class BRMenuEntry: NSObject {
             }
             return
         }
+        #if BRMENU_LICENSED
+        guard licenseAllowed else { licenseGate.present(in: scene); return }
+        #endif
         let menu = DiagnosticMenu()
         menu.playerProvider = { walls, distance in BRPlayerSnapshot.snapshot(ignoringRenderFlags: walls, maxDistance: distance) }
         menu.playerStatusProvider = { BRPlayerSnapshot.status() }
