@@ -2,6 +2,7 @@ services:
   - type: web
     name: br-license-bot
     runtime: python
+    plan: free
     rootDir: licensing
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn brlicense.app:create_app --factory --host 0.0.0.0 --port $PORT --no-access-log
