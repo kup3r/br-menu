@@ -9,6 +9,7 @@ on:
       - 'Inject/PlayerSnapshot.*'
       - 'Inject/ReactPolicies.hpp'
       - 'scripts/*client19*'
+      - 'scripts/*client20*'
       - 'scripts/react_policy_tests.cpp'
       - 'scripts/command_alias_tests.swift'
       - 'scripts/build_dylib.sh'
@@ -69,6 +70,10 @@ jobs:
           clang++ -std=c++17 -O2 -Wall -Wextra -Werror scripts/react_policy_tests.cpp -o /tmp/react-policy-tests
           /tmp/react-policy-tests
           python3 scripts/check_client19.py
+          python3 scripts/check_client20.py
+          python3 -m venv /tmp/react-adapter-tests
+          /tmp/react-adapter-tests/bin/pip install unicorn==2.1.4
+          /tmp/react-adapter-tests/bin/python scripts/test_client20_adapters.py
       - name: Test command expansion and argument preservation
         run: |
           swiftc Sources/DiagnosticMenu/ReactCommands.swift scripts/command_alias_tests.swift -o /tmp/react-command-tests

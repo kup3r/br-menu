@@ -182,7 +182,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
             decor.renderESP()
         } else { decor.hideESP() }
         let prefs = MenuPreferences.shared
-        if prefs.flag("silentAim"), scene?.activationState == .foregroundActive {
+        if (prefs.flag("silentAim") || prefs.flag("triggerBot")), scene?.activationState == .foregroundActive {
             lastAimState = aimFrameProvider?(Double(decor.bounds.width), Double(decor.bounds.height), Double(decor.horizontalScale)) ?? [:]
             decor.updateAim(lastAimState)
         } else { decor.hideAim(); lastAimState = [:] }
@@ -426,6 +426,10 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     }
     private func configureControls() {
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
+        values["triggerAimOnly"] = MenuPreferences.shared.flag("triggerAimOnly", fallback: true) ? 1 : 0
+        values["triggerRadius"] = MenuPreferences.shared.triggerRadius
+        values["triggerDelay"] = MenuPreferences.shared.triggerDelay
+        values["lagInterval"] = MenuPreferences.shared.lagInterval
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
         values["runMultiplier"] = MenuPreferences.shared.runMultiplier
@@ -579,10 +583,22 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed"]
+    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
+    var lagInterval: Double {
+        get { defaults.object(forKey: "lagInterval") == nil ? 200 : max(50, min(500, defaults.double(forKey: "lagInterval"))) }
+        set { defaults.set(newValue, forKey: "lagInterval") }
+    }
+    var triggerRadius: Double {
+        get { defaults.object(forKey: "triggerRadius") == nil ? 10 : max(2, min(30, defaults.double(forKey: "triggerRadius"))) }
+        set { defaults.set(newValue, forKey: "triggerRadius") }
+    }
+    var triggerDelay: Double {
+        get { defaults.object(forKey: "triggerDelay") == nil ? 120 : max(0, min(500, defaults.double(forKey: "triggerDelay"))) }
+        set { defaults.set(newValue, forKey: "triggerDelay") }
+    }
     var runMultiplier: Double {
         get { defaults.object(forKey: "runMultiplier") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "runMultiplier"))) }
         set { defaults.set(newValue, forKey: "runMultiplier") }
@@ -651,7 +667,7 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "hopPower") == nil ? 1 : max(1, min(5, defaults.double(forKey: "hopPower"))) }
         set { defaults.set(newValue, forKey: "hopPower") }
     }
-    var needsPlayers: Bool { flag("esp") || flag("silentAim") }
+    var needsPlayers: Bool { flag("esp") || flag("silentAim") || flag("triggerBot") }
     var aimMiss: Double {
         get { max(0, min(100, defaults.double(forKey: "aimMiss"))) }
         set { defaults.set(newValue, forKey: "aimMiss") }
@@ -1097,6 +1113,7 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(selfStatus)
         pages[4].addArrangedSubview(button("Suicide · завершить жизнь персонажа", "suicide"))
         pages[4].addArrangedSubview(button("Fast Respawn · появиться снова", "respawn"))
+        pages[4].addArrangedSubview(toggle("Антифриз / Anti-Tazer", key: "antiFreeze"))
         pages[4].addArrangedSubview(toggle("NoAnim · отключение анимаций", key: "noAnim"))
         pages[4].addArrangedSubview(toggle("Fast Anim · ускоренные анимации", key: "fastAnim"))
         let animationLabel = note(String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate))
@@ -1136,6 +1153,24 @@ private final class MenuController: UIViewController {
         fireRate.accessibilityLabel = "Множитель скорострельности"
         fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
+        pages[6].addArrangedSubview(toggle("TriggerBot", key: "triggerBot"))
+        pages[6].addArrangedSubview(toggle("TriggerBot только при прицеливании", key: "triggerAimOnly", fallback: true))
+        let triggerRadiusLabel = note(String(format: "Зона TriggerBot: %.0f pt", MenuPreferences.shared.triggerRadius))
+        let triggerRadius = UISlider(); triggerRadius.minimumValue = 2; triggerRadius.maximumValue = 30; triggerRadius.value = Float(MenuPreferences.shared.triggerRadius)
+        triggerRadius.accessibilityLabel = "Зона TriggerBot"
+        triggerRadius.addAction(UIAction { [weak self, weak triggerRadius] _ in
+            MenuPreferences.shared.triggerRadius = Double(triggerRadius?.value ?? 10)
+            triggerRadiusLabel.text = String(format: "Зона TriggerBot: %.0f pt", MenuPreferences.shared.triggerRadius); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(triggerRadiusLabel); pages[6].addArrangedSubview(triggerRadius)
+        let triggerDelayLabel = note(String(format: "Задержка TriggerBot: %.0f мс", MenuPreferences.shared.triggerDelay))
+        let triggerDelay = UISlider(); triggerDelay.minimumValue = 0; triggerDelay.maximumValue = 500; triggerDelay.value = Float(MenuPreferences.shared.triggerDelay)
+        triggerDelay.accessibilityLabel = "Задержка TriggerBot"
+        triggerDelay.addAction(UIAction { [weak self, weak triggerDelay] _ in
+            MenuPreferences.shared.triggerDelay = Double(triggerDelay?.value ?? 120)
+            triggerDelayLabel.text = String(format: "Задержка TriggerBot: %.0f мс", MenuPreferences.shared.triggerDelay); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(triggerDelayLabel); pages[6].addArrangedSubview(triggerDelay)
         pages[6].addArrangedSubview(toggle("Silent Aim", key: "silentAim"))
         aimStatus.numberOfLines = 0; aimStatus.font = .monospacedSystemFont(ofSize: 10, weight: .regular); aimStatus.textColor = .systemGreen
         pages[6].addArrangedSubview(aimStatus)
@@ -1170,6 +1205,15 @@ private final class MenuController: UIViewController {
         }, for: .valueChanged)
         extensionStatus.numberOfLines = 0; extensionStatus.font = .systemFont(ofSize: 11); extensionStatus.textColor = .systemCyan
         pages[7].addArrangedSubview(extensionStatus)
+        pages[7].addArrangedSubview(toggle("Fake Lag · синхронизация пешком", key: "fakeLag"))
+        let lagLabel = note(String(format: "Интервал синхронизации: %.0f мс", MenuPreferences.shared.lagInterval))
+        let lag = UISlider(); lag.minimumValue = 50; lag.maximumValue = 500; lag.value = Float(MenuPreferences.shared.lagInterval)
+        lag.accessibilityLabel = "Интервал Fake Lag"
+        lag.addAction(UIAction { [weak self, weak lag] _ in
+            MenuPreferences.shared.lagInterval = Double(lag?.value ?? 200)
+            lagLabel.text = String(format: "Интервал синхронизации: %.0f мс", MenuPreferences.shared.lagInterval); self?.onChange?()
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(lagLabel); pages[7].addArrangedSubview(lag)
         pages[7].addArrangedSubview(toggle("Свой FOV камеры", key: "cameraFOVOverride"))
         let cameraFOVLabel = note(String(format: "FOV камеры: %.0f°", MenuPreferences.shared.cameraFOV))
         let cameraFOV = UISlider(); cameraFOV.minimumValue = 50; cameraFOV.maximumValue = 120; cameraFOV.value = Float(MenuPreferences.shared.cameraFOV)

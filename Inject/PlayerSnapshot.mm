@@ -391,7 +391,15 @@ AimSettings aimSettings;
 std::array<AimActor,128> aimActors{};size_t aimCount=0;
 double aimReceived=0;AimActor aimChosen{};bool aimHasChosen=false;
 uint16_t aimOwnID=UINT16_MAX;float aimRange=0;V3 aimOwnPosition{};
-std::atomic<bool> aimEnabled{false};
+std::atomic<bool> aimEnabled{false},triggerEnabled{false},antiFreezeEnabled{false};
+std::atomic<int> lagIntervalMs{0},triggerDelayMs{120},triggerRadius{10};
+std::atomic<bool> triggerAimOnly{true};
+std::atomic<double> lagSentAt{0};
+std::atomic<uint64_t> lagOwner{0},lagShots{0};
+std::mutex triggerMutex;
+struct TriggerState {uint64_t ped=0;uint16_t target=UINT16_MAX;double acquired=0;uint32_t frame=UINT32_MAX;bool held=false,pressed=false;};
+TriggerState triggerState;
+void resetTrigger() {std::lock_guard<std::mutex> lock(triggerMutex);triggerState={};}
 std::atomic<uint64_t> aimCallbacks{0},aimRedirects{0},aimSkipped{0};
 std::atomic<uint64_t> ownShotEvents{0};
 bool aimBridgeReady(uint64_t base) {
@@ -415,13 +423,13 @@ std::mutex chatAliasMutex;
 std::unordered_map<std::string,std::string> chatAliases;
 bool extensionBridgeReady(uint64_t base) {
     std::array<char,8> magic{};uint32_t version=0,count=0;
-    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT19",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=4)return false;
-    const uint32_t entries[]={0x9f5fc4,0xbf228,0xa524f4,0xa76558};
-    for(uint32_t i=0;i<4;++i) {
+    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT20",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=9)return false;
+    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0xb9dcd0,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40}};
+    for(uint32_t i=0;i<9;++i) {
         std::array<uint32_t,4> record{};uint32_t opcode=0;
-        const uint32_t bridge=0x3000+i*0x300,trampoline=0x3c00+i*0x20,symbol=0x3d00+i*0x40;
-        const uint32_t branch=0x14000000U|((uint32_t((int64_t(bridge)-entries[i])/4))&0x3ffffffU);
-        if(!read(base+0x3f10+i*16,record)||record!=std::array<uint32_t,4>{entries[i],bridge,trampoline,symbol}||!read(base+entries[i],opcode)||opcode!=branch)return false;
+        const auto &r=expected[i];
+        const uint32_t branch=0x14000000U|((uint32_t((int64_t(r[1])-r[0])/4))&0x3ffffffU);
+        if(!read(base+0x3f10+i*16,record)||record!=r||!read(base+r[0],opcode)||opcode!=branch)return false;
     }
     return true;
 }
@@ -447,7 +455,7 @@ V3 aimPoint(const AimActor &a,V3 root,bool head) {
 }
 void resetAimTarget() {std::lock_guard<std::mutex> lock(aimMutex);aimHasChosen=false;aimRange=0;}
 void tickAimContext() {
-    if(!aimEnabled.load(std::memory_order_relaxed))return;
+    if(!aimEnabled.load(std::memory_order_relaxed)&&!triggerEnabled.load())return;
     Local s;Weapon w;float range=0,health=0;uint32_t state=0;bool valid=false;
     NSString *reason=@"Ожидание персонажа или несовпадение UUID клиента";
     if(getLocal(s)) {
@@ -741,6 +749,109 @@ const char *BRMenuChat19(const char *input) noexcept {
     }catch(...){return input;}
 }
 
+namespace {
+bool liveConnected(Local &s) {
+    int32_t state=0;float hp=0;uint32_t pedState=0;
+    return getLocal(s)&&read(s.base+0x340de10,state)&&state==14&&read(s.ped+0x4b0,hp)&&
+        read(s.ped+0x494,pedState)&&BRAim::living(hp,hp,pedState)&&sameLocal(s);
+}
+using FireInput=int32_t(*)(void *);
+int32_t triggerInput(void *pad,FireInput original,bool pressed) noexcept {
+    if(!original)return 0;
+    const int32_t manual=original(pad);
+    if(manual||!triggerEnabled.load()||![NSThread isMainThread])return manual;
+    @autoreleasepool {
+        Local s;Weapon weapon;uint16_t blocked=0;
+        if(!liveConnected(s)||s.vehicle||reinterpret_cast<uint64_t>(pad)!=s.base+0x2ed1638||
+           !read(s.base+0x2ed1638+0x10e,blocked)||blocked||!getWeapon(s,weapon)||!sameWeapon(s,weapon)||weapon.clip<=0)return 0;
+        // This is the exact weapon permission query in CPad::GetFire.
+        if(!anchorAt(s.base,0xf6ed8,0x94289d05U))return 0;
+        using Permission=bool(*)(void *,void *);
+        if(!reinterpret_cast<Permission>(s.base+0xb1e2ec)(reinterpret_cast<void *>(weapon.info),reinterpret_cast<void *>(s.ped)))return 0;
+        if(triggerAimOnly.load()) {
+            using AimInput=int32_t(*)(void *);
+            if(!reinterpret_cast<AimInput>(s.base+0xf7248)(pad))return 0;
+        }
+        const double now=NSProcessInfo.processInfo.systemUptime;uint32_t frame=0;
+        if(!read(s.base+0x2f348e0,frame))return 0;
+        std::lock_guard<std::mutex> triggerLock(triggerMutex);
+        if(triggerState.ped==s.ped&&triggerState.frame==frame)return pressed?triggerState.pressed:triggerState.held;
+        BRAim::View view{};std::array<AimActor,128> actors{};size_t count=0;double received=0;
+        std::array<bool,1504> excluded{};std::unordered_set<std::string> names;
+        {std::lock_guard<std::mutex> lock(aimMutex);view=aimSettings.view;actors=aimActors;count=aimCount;received=aimReceived;excluded=aimSettings.excluded;names=aimSettings.names;}
+        Matrix camera{};float range=0;uint16_t selected=UINT16_MAX;
+        if(now-received<=0.2&&read(s.base+0x22892a0+0x900,camera)&&read(weapon.info+0x28,range)&&range>0&&range<10000) {
+            std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());view.radius=triggerRadius.load();
+            // Pick from the shared snapshot first; re-read only that actor each frame.
+            std::array<BRAim::Candidate,128> candidates{};
+            const double radius=view.radius;view.radius=radius+16;
+            for(size_t i=0;i<count;++i) {
+                const auto &actor=actors[i];
+                candidates[i]={actor.id,aimVec(aimPoint(actor,actor.root,false)),actor.hp,actor.physicalHP,actor.state,
+                    actor.id>=1504||excluded[actor.id]||names.count(actor.nick.data())!=0};
+            }
+            const auto choice=BRAim::choose(view,aimVec(s.position),range,s.id,candidates.data(),count);view.radius=radius;
+            if(choice.found) {
+                const auto &actor=actors[choice.index];uint64_t remote=0,ped=0;uint16_t id=0;float hp=0,physicalHP=0;uint32_t state=0;V3 root{};
+                if(read(s.pool+8+uint64_t(actor.id)*8,remote)&&remote==actor.remote&&read(remote+0x10,ped)&&ped==actor.ped&&
+                   read(remote+0x4a,id)&&id==actor.id&&read(remote+0x148,hp)&&read(ped+0x4b0,physicalHP)&&read(ped+0x494,state)&&
+                   BRAim::living(hp,physicalHP,state)&&read(ped+0x38,root)&&finite(root)) {
+                    const V3 point=aimPoint(actor,root,false);const double dx=point.x-s.position.x,dy=point.y-s.position.y,dz=point.z-s.position.z;
+                    V3 cameraPosition{};uint8_t activeCamera=0;
+                    if(dx*dx+dy*dy+dz*dz<=double(range)*range&&BRAim::score(view,aimVec(point))>=0&&
+                       read(s.base+0x22892a0+0x94,activeCamera)&&activeCamera<3&&
+                       read(s.base+0x22892a0+uint64_t(activeCamera)*0x1e8+0x334,cameraPosition)&&finite(cameraPosition)&&
+                       anchorAt(s.base,0x11b49c,0xd10443ffU)) {
+                        // Same line-clear query and flags used by the game's bullet path (b0c490).
+                        using Clear=bool(*)(const V3 *,const V3 *,bool,bool,bool,bool,bool,bool,bool);
+                        if(reinterpret_cast<Clear>(s.base+0x11b49c)(&cameraPosition,&point,true,true,false,true,false,false,false))selected=actor.id;
+                    }
+                }
+            }
+        }
+        const bool wasHeld=triggerState.ped==s.ped&&triggerState.target==selected&&triggerState.held;
+        if(triggerState.ped!=s.ped||triggerState.target!=selected)triggerState={s.ped,selected,now,frame,false,false};
+        triggerState.frame=frame;
+        const bool acquired=selected!=UINT16_MAX&&now-triggerState.acquired>=triggerDelayMs.load()/1000.0;
+        // Alternate held/released windows so semi-automatic weapons get an edge.
+        triggerState.held=acquired&&(uint64_t((now-triggerState.acquired)*1000)/80)%2==0;
+        triggerState.pressed=triggerState.held&&!wasHeld;
+        return triggerEnabled.load()?(pressed?triggerState.pressed:triggerState.held):0;
+    }
+}
+}
+extern "C" __attribute__((used,visibility("default")))
+int32_t BRMenuFireHeld20(void *pad,FireInput original) noexcept {return triggerInput(pad,original,false);}
+extern "C" __attribute__((used,visibility("default")))
+int32_t BRMenuFirePressed20(void *pad,FireInput original) noexcept {return triggerInput(pad,original,true);}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuLag20(uint64_t peer,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
+    const int interval=lagIntervalMs.load();if(interval<=0)return 1;
+    @autoreleasepool {
+        const uint64_t base=verifiedProjectionBase.load();uint64_t interface=0;
+        if(!base||caller!=base+0x930990||!read(base+0x340de08,interface)||interface<0x690||peer!=interface-0x690)return 1;
+        Local s;if(!liveConnected(s)||s.vehicle){lagSentAt.store(0);return 1;}
+        const double now=NSProcessInfo.processInfo.systemUptime;
+        if(lagOwner.exchange(s.ped)!=s.ped)lagSentAt.store(0);
+        const uint64_t shots=ownShotEvents.load();const bool shot=lagShots.exchange(shots)!=shots;
+        double previous=lagSentAt.load();
+        if(shot||previous<=0||now<previous||now-previous>=interval/1000.0) {
+            lagSentAt.store(now);return 1;
+        }
+        return lagIntervalMs.load()>0?0:1;
+    }
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuStun20(uint64_t,uint64_t victim,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t) noexcept {
+    if(!antiFreezeEnabled.load())return 1;
+    @autoreleasepool {Local s;return !liveConnected(s)||victim!=s.ped?1:0;}
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
+    if(!antiFreezeEnabled.load())return controllable;
+    @autoreleasepool {Local s;return liveConnected(s)&&owner==s.local?1:controllable;}
+}
+
 @implementation BRPlayerSnapshot
 + (NSString *)extensionStatus {return extensionBridgeReady(imageBase())?@"Дополнительные настройки подключены":@"Нужен обновлённый IPA";}
 + (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules {
@@ -760,7 +871,7 @@ const char *BRMenuChat19(const char *input) noexcept {
     NSData *utf8=[command dataUsingEncoding:NSUTF8StringEncoding];
     if(![command hasPrefix:@"/"]||utf8.length<2||utf8.length>512||[command rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location!=NSNotFound)return @"Некорректная команда";
     // The verified exported routine immediately copies the UTF-8 string into its queued job.
-    using Send=void(*)(const char *);reinterpret_cast<Send>(base+0x3c60)(command.UTF8String);
+    using Send=void(*)(const char *);reinterpret_cast<Send>(base+0x3b60)(command.UTF8String);
     return @"Команда отправлена";
 }
 + (uint64_t)ownShotCount { return ownShotEvents.load(std::memory_order_relaxed); }
@@ -834,7 +945,7 @@ const char *BRMenuChat19(const char *input) noexcept {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};runTrack={};desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        const Flight old=flight;flight={};assists={};runTrack={};triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -848,6 +959,23 @@ const char *BRMenuChat19(const char *input) noexcept {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
         const bool extended=extensionBridgeReady(imageBase());
+        triggerEnabled.store(extended&&settings[@"triggerBot"].boolValue);
+        triggerRadius.store(std::clamp(settings[@"triggerRadius"].intValue,2,30));
+        triggerDelayMs.store(std::clamp(settings[@"triggerDelay"].intValue,0,500));
+        triggerAimOnly.store(settings[@"triggerAimOnly"].boolValue);
+        if(!triggerEnabled.load())resetTrigger();
+        const bool anti=extended&&settings[@"antiFreeze"].boolValue;
+        const bool previouslyAnti=antiFreezeEnabled.exchange(anti);
+        if(anti&&!previouslyAnti) {
+            Local s;uint8_t blocked=0;
+            if(liveConnected(s)&&read(s.local+0x1ec,blocked)&&(blocked&1)&&anchorAt(s.base,0x9533a8,0xd10543ffU)) {
+                const uint8_t enabled=1;struct RPC {const uint8_t *data;uint32_t bits;uint32_t padding;};const RPC rpc{&enabled,8,0};
+                using Toggle=void(*)(const RPC *);reinterpret_cast<Toggle>(s.base+0x9533a8)(&rpc);
+            }
+        }
+        const int interval=extended&&settings[@"fakeLag"].boolValue?std::clamp(settings[@"lagInterval"].intValue,50,500):0;
+        if(lagIntervalMs.exchange(interval)!=interval){lagSentAt.store(0);lagOwner.store(0);}
+
         const double fov=settings[@"cameraFOV"].doubleValue;
         desiredCameraFOV.store(extended&&settings[@"cameraFOVOverride"].boolValue&&std::isfinite(fov)?float(std::clamp(fov,50.0,120.0)):0);
         const int hour=settings[@"worldHour"].intValue,minute=settings[@"worldMinute"].intValue,weather=settings[@"worldWeather"].intValue;
