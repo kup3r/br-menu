@@ -41,7 +41,9 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         controller.view.addSubview(button)
         NSLayoutConstraint.activate([
             button.centerXAnchor.constraint(equalTo: controller.view.centerXAnchor),
-            button.bottomAnchor.constraint(equalTo: controller.view.safeAreaLayoutGuide.bottomAnchor, constant: -24)
+            button.bottomAnchor.constraint(equalTo: controller.view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
+            button.widthAnchor.constraint(equalToConstant: 260),
+            button.heightAnchor.constraint(equalToConstant: 150)
         ])
         var taps = 0
         button.addAction(UIAction { _ in
