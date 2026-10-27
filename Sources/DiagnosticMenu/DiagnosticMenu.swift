@@ -428,6 +428,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
+        values["runMultiplier"] = MenuPreferences.shared.runMultiplier
         values["cameraFOV"] = MenuPreferences.shared.cameraFOV
         values["worldHour"] = MenuPreferences.shared.worldHour
         values["worldMinute"] = MenuPreferences.shared.worldMinute
@@ -578,10 +579,14 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto"]
+    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
+    var runMultiplier: Double {
+        get { defaults.object(forKey: "runMultiplier") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "runMultiplier"))) }
+        set { defaults.set(newValue, forKey: "runMultiplier") }
+    }
     var cameraFOV: Double {
         get { defaults.object(forKey: "cameraFOV") == nil ? 70 : max(50, min(120, defaults.double(forKey: "cameraFOV"))) }
         set { defaults.set(newValue, forKey: "cameraFOV") }
@@ -1014,6 +1019,14 @@ private final class MenuController: UIViewController {
         fov.accessibilityLabel = "Радиус FOV"
         fov.addAction(UIAction { [weak self, weak fov] _ in MenuPreferences.shared.fovRadius = Double(fov?.value ?? 100); self?.onChange?() }, for: .valueChanged)
         pages[1].addArrangedSubview(fov)
+        pages[2].addArrangedSubview(toggle("Ускорение пешком", key: "runSpeed"))
+        let runLabel = note(String(format: "Скорость бега: ×%.1f", MenuPreferences.shared.runMultiplier))
+        let runSpeed = UISlider(); runSpeed.minimumValue = 1; runSpeed.maximumValue = 3; runSpeed.value = Float(MenuPreferences.shared.runMultiplier)
+        runSpeed.addAction(UIAction { [weak self, weak runSpeed] _ in
+            MenuPreferences.shared.runMultiplier = Double(runSpeed?.value ?? 1.5)
+            runLabel.text = String(format: "Скорость бега: ×%.1f", MenuPreferences.shared.runMultiplier); self?.onChange?()
+        }, for: .valueChanged)
+        pages[2].addArrangedSubview(runLabel); pages[2].addArrangedSubview(runSpeed)
         flightStatus.text = "AirBrake выключен"; flightStatus.font = .systemFont(ofSize: 11); flightStatus.textColor = .systemOrange
         pages[2].addArrangedSubview(flightStatus)
         pages[2].addArrangedSubview(toggle("No Collision · без столкновений", key: "noCollision"))

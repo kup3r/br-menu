@@ -14,5 +14,15 @@ int main(){
     }
     assert(clock(12,10,24,0)==(uint64_t(12)|(uint64_t(10)<<32)));
     for(int value=-2;value<24;++value)assert(weather(4,value)==uint32_t(value>=0&&value<=21?value:4));
+    float x=0,y=0;
+    assert(runStep(0.2f,0,0.1f,0,0.05,2,x,y)&&std::abs(x-0.2f)<0.00001f&&y==0);
+    // Last position is measured after the previous adjustment: base displacement stays constant.
+    float position=0,after=0;
+    for(int i=0;i<100;++i){position=after+0.2f;assert(runStep(position-after,0,0.1f,0,0.05,2,x,y));after=position+x;}
+    assert(std::abs(after-40)<0.001);
+    assert(!runStep(10,0,0.1f,0,0.05,2,x,y)); // teleport/server correction
+    assert(!runStep(0,0,0.1f,0,0.05,2,x,y)); // idle
+    assert(!runStep(-0.1f,0,0.1f,0,0.05,2,x,y)); // collision correction opposing movement
+    assert(!runStep(0.2f,0,0,0,0.05,2,x,y));
     std::cout<<"FOV, clock packing, weather bounds and disabled fallbacks passed\n";
 }

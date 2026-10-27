@@ -80,8 +80,8 @@ Flight flight;
 struct Assists {
     bool health=false,armor=false,stamina=false,vehicleHealth=false,slowFall=false;
     bool noClip=false,proof=false,noFall=false,vehicleProof=false,ammo=false,magazine=false,rapid=false;
-    bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false;
-    double fireRate=2,animationRate=2;
+    bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false,runSpeed=false;
+    double fireRate=2,animationRate=2,runMultiplier=1.5;
 };
 Assists assists;
 struct Local { uint64_t base=0,pool=0,local=0,ped=0,vehicle=0; uint16_t id=0; V3 position{},velocity{}; };
@@ -108,6 +108,18 @@ template<class T> bool writeData(uint64_t address,const T &value) {
     T before{};if(!read(address,before))return false;
     return vm_write(mach_task_self(),static_cast<vm_address_t>(address),
         reinterpret_cast<vm_offset_t>(&value),static_cast<mach_msg_type_number_t>(sizeof(T)))==KERN_SUCCESS;
+}
+struct RunTrack {uint64_t ped=0,local=0;uint16_t id=0;V3 after{};};
+RunTrack runTrack;
+void updateRunSpeed(const Local &s,double elapsed,bool alive) {
+    if(!assists.runSpeed||!alive||s.vehicle||flight.active||std::abs(s.velocity.z)>0.06f){runTrack={};return;}
+    if(runTrack.ped!=s.ped||runTrack.local!=s.local||runTrack.id!=s.id){runTrack={s.ped,s.local,s.id,s.position};return;}
+    const V3 previous=runTrack.after;runTrack.after=s.position;float extraX=0,extraY=0;
+    if(!React19::runStep(s.position.x-previous.x,s.position.y-previous.y,s.velocity.x,s.velocity.y,elapsed,assists.runMultiplier,extraX,extraY)||!sameLocal(s))return;
+    V3 next{s.position.x+extraX,s.position.y+extraY,s.position.z};
+    if(!finite(next)||std::abs(next.x)>20000||std::abs(next.y)>20000)return;
+    const uint8_t dirty=1;
+    if(writeData(s.ped+0x60,dirty)&&writeData(s.ped+0x38,next))runTrack.after=next;
 }
 struct MassBackup { uint64_t entity=0,ped=0,local=0;float original=0;uint16_t id=0; };
 MassBackup pedMass,vehicleMass;
@@ -822,7 +834,7 @@ const char *BRMenuChat19(const char *input) noexcept {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        const Flight old=flight;flight={};assists={};runTrack={};desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -848,6 +860,10 @@ const char *BRMenuChat19(const char *input) noexcept {
         assists.proof=settings[@"localProof"].boolValue;assists.noFall=settings[@"noFall"].boolValue;
         assists.vehicleProof=settings[@"vehicleProof"].boolValue;assists.ammo=settings[@"infiniteAmmo"].boolValue;
         assists.noCollision=settings[@"noCollision"].boolValue;assists.noSpread=settings[@"noSpread"].boolValue;
+        assists.runSpeed=settings[@"runSpeed"].boolValue;
+        const double runFactor=settings[@"runMultiplier"].doubleValue;
+        assists.runMultiplier=std::isfinite(runFactor)?std::clamp(runFactor,1.0,3.0):1.5;
+        if(!assists.runSpeed)runTrack={};
         assists.noAnim=settings[@"noAnim"].boolValue;assists.fastAnim=settings[@"fastAnim"].boolValue;
         const double animationRate=settings[@"animationRate"].doubleValue;
         assists.animationRate=std::isfinite(animationRate)?std::clamp(animationRate,1.0,4.0):2;
@@ -863,7 +879,7 @@ const char *BRMenuChat19(const char *input) noexcept {
         tickWaypoint();
         tickAimContext();
         if(!flight.active&&!assists.health&&!assists.armor&&!assists.stamina&&!assists.vehicleHealth&&!assists.slowFall&&
-           !assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
+           !assists.runSpeed&&!assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
         Local s;
         if(!std::isfinite(elapsed)||elapsed<=0||elapsed>0.25||!getLocal(s)) {flight={};return;}
         updatePedFlags(s);updateVehicleGuard(s);weaponAssists(s);updateSpread(s);updateAnimations(s);
@@ -873,6 +889,7 @@ const char *BRMenuChat19(const char *input) noexcept {
         const bool staminaVerified=read(s.base+0x9d2ad0,staminaAnchor)&&staminaAnchor==0xbd088260U;
         float health=0;
         const bool alive=pedVerified&&read(s.ped+0x4b0,health)&&std::isfinite(health)&&health>0&&health<=10000;
+        updateRunSpeed(s,elapsed,alive&&!waypointJob.active);
         if(alive&&sameLocal(s)) {
             const float hundred=100;
             if(assists.health&&health<100)(void)writeData(s.ped+0x4b0,hundred);
