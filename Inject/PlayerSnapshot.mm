@@ -424,7 +424,7 @@ std::unordered_map<std::string,std::string> chatAliases;
 bool extensionBridgeReady(uint64_t base) {
     std::array<char,8> magic{};uint32_t version=0,count=0;
     if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT20",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=9)return false;
-    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0xb9dcd0,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40}};
+    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0x930724,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40}};
     for(uint32_t i=0;i<9;++i) {
         std::array<uint32_t,4> record{};uint32_t opcode=0;
         const auto &r=expected[i];
@@ -825,12 +825,14 @@ int32_t BRMenuFireHeld20(void *pad,FireInput original) noexcept {return triggerI
 extern "C" __attribute__((used,visibility("default")))
 int32_t BRMenuFirePressed20(void *pad,FireInput original) noexcept {return triggerInput(pad,original,true);}
 extern "C" __attribute__((used,visibility("default")))
-uint32_t BRMenuLag20(uint64_t peer,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
+uint32_t BRMenuLag20(uint64_t owner,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
     const int interval=lagIntervalMs.load();if(interval<=0)return 1;
     @autoreleasepool {
-        const uint64_t base=verifiedProjectionBase.load();uint64_t interface=0;
-        if(!base||caller!=base+0x930990||!read(base+0x340de08,interface)||interface<0x690||peer!=interface-0x690)return 1;
+        const uint64_t base=verifiedProjectionBase.load();
+        if(!base||caller!=base+0x92e5b4)return 1;
         Local s;if(!liveConnected(s)||s.vehicle){lagSentAt.store(0);return 1;}
+        if(owner!=s.local)return 1;
+        // Gate before serialization and last-sent caching; do not mark dropped snapshots as sent.
         const double now=NSProcessInfo.processInfo.systemUptime;
         if(lagOwner.exchange(s.ped)!=s.ped)lagSentAt.store(0);
         const uint64_t shots=ownShotEvents.load();const bool shot=lagShots.exchange(shots)!=shots;

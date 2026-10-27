@@ -41,10 +41,10 @@
   },
   {
     "name": "FakeLag",
-    "entry": 12180688,
+    "entry": 9635620,
     "bridge": 4352,
     "export": "BRMenuLag20",
-    "original": "ff8302d1fc6f04a9fa6705a9f85f06a9",
+    "original": "ff8307d1eb2b196de9231a6df6571ba9",
     "kind": "gate",
     "trampoline": 15232,
     "symbol": 15680,
