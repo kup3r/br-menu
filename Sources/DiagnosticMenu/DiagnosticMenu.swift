@@ -227,12 +227,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         sampleGameRate()
         applyStretch()
         if MenuPreferences.shared.flag("silentAim") {
-            let status = lastAimState["status"] as? String ?? "Ожидание источника наведения"
-            let callbacks = (lastAimState["callbacks"] as? NSNumber)?.uint64Value ?? 0
-            let redirects = (lastAimState["redirects"] as? NSNumber)?.uint64Value ?? 0
-            let skipped = (lastAimState["skipped"] as? NSNumber)?.uint64Value ?? 0
             let candidates = (lastAimState["candidates"] as? NSNumber)?.intValue ?? 0
-            let range = (lastAimState["range"] as? NSNumber)?.doubleValue ?? 0
             host.aimStatus.text = "Целей: \(candidates)"
         } else { host.aimStatus.text = "Silent Aim выключен" }
         if let position = coordinateProvider?() { setLocalCoordinates(x: position.x, y: position.y, z: position.z) }
@@ -1083,8 +1078,8 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
-        pages[5].addArrangedSubview(toggle("Доп. звук выстрела", key: "customShotSound")
-        pages[5].addArrangedSubview(note("Воспроизводится поверх звука игры")))
+        pages[5].addArrangedSubview(toggle("Доп. звук выстрела", key: "customShotSound"))
+        pages[5].addArrangedSubview(note("Воспроизводится поверх звука игры"))
         pages[5].addArrangedSubview(button("Прослушать звук", "shotPreview"))
         pages[5].addArrangedSubview(button("Импортировать звук", "shotImport"))
         pages[5].addArrangedSubview(button("Мягкий щелчок", "shotReset"))
