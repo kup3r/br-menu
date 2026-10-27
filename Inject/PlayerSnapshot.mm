@@ -1,4 +1,6 @@
 #import "PlayerSnapshot.h"
+#import <objc/runtime.h>
+#import <dispatch/dispatch.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
@@ -180,7 +182,7 @@ bool getWeapon(const Local &s,Weapon &w) {
         uint64_t next=0;if(!read(node+0x210,next)||next==node)return false;node=next;
     }
     uint32_t fire=0;
-    return w.info&&read(w.info+0x20,fire)&&fire==1&&read(w.info+0x34,w.capacity)&&w.capacity>=1&&w.capacity<=1000;
+    return w.info&&read(w.info+0x20,fire)&&(fire==1||fire==4)&&read(w.info+0x34,w.capacity)&&w.capacity>=1&&w.capacity<=1000;
 }
 bool sameWeapon(const Local &s,const Weapon &w) {
     uint64_t brain=0,begin=0,end=0;uint8_t slot=0,id=0;
@@ -267,14 +269,14 @@ bool registeredBit(uint64_t base,uint64_t header,uint32_t id) {
     return read(begin+uint64_t(id/64)*8,word)&&((word>>(id%64))&1);
 }
 uint64_t modelCatalog(uint64_t base,uint32_t id,uint8_t expected=0) {
-    if(id>1000000||!registeredBit(base,0x19b22a8,id))return 0;
+    if(!registeredBit(base,0x19b22a8,id))return 0;
     uint64_t chunks=0,chunk=0,info=0;uint8_t kind=0;
     if(!read(base+0x19b2290,chunks)||!chunks||!read(chunks+uint64_t(id/1024)*8,chunk)||!chunk||
        !read(chunk+uint64_t(id%1024)*8,info)||!info||!read(info+0x20,kind))return 0;
     return !expected||kind==expected?info:0;
 }
 uint64_t streamSlot(uint64_t base,uint32_t id) {
-    if(id>1000000||!registeredBit(base,0x2ed3c30,id))return 0;
+    if(!registeredBit(base,0x2ed3c30,id))return 0;
     uint64_t chunks=0,chunk=0;
     if(!read(base+0x2ed3c18,chunks)||!chunks||!read(chunks+uint64_t(id/512)*8,chunk)||!chunk)return 0;
     return chunk+uint64_t(id%512)*96;
@@ -391,6 +393,9 @@ AimSettings aimSettings;
 std::array<AimActor,128> aimActors{};size_t aimCount=0;
 double aimReceived=0;AimActor aimChosen{};bool aimHasChosen=false;
 uint16_t aimOwnID=UINT16_MAX;float aimRange=0;V3 aimOwnPosition{};
+std::atomic<bool> regularAimEnabled{false},customShotEnabled{false},customHitEnabled{false},hideLogoEnabled{false},localCommandsEnabled{false};
+std::atomic<double> aimSmoothSeconds{0.2};
+std::atomic<bool> regularAimVisible{true};
 std::atomic<bool> aimEnabled{false},triggerEnabled{false},antiFreezeEnabled{false};
 std::atomic<int> lagIntervalMs{0},triggerDelayMs{120},triggerRadius{10};
 std::atomic<bool> triggerAimOnly{true};
@@ -423,9 +428,9 @@ std::mutex chatAliasMutex;
 std::unordered_map<std::string,std::string> chatAliases;
 bool extensionBridgeReady(uint64_t base) {
     std::array<char,8> magic{};uint32_t version=0,count=0;
-    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT20",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=9)return false;
-    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0x930724,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40}};
-    for(uint32_t i=0;i<9;++i) {
+    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT21",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=13)return false;
+    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0x930724,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40},{0xb0dd5c,0x2700,0x2340,0x2400},{0x64adc,0x2900,0x2360,0x2440},{0xb0f064,0x2b00,0x2380,0x2480},{0x96ff18,0x2d40,0x23a0,0x21c0}};
+    for(uint32_t i=0;i<13;++i) {
         std::array<uint32_t,4> record{};uint32_t opcode=0;
         const auto &r=expected[i];
         const uint32_t branch=0x14000000U|((uint32_t((int64_t(r[1])-r[0])/4))&0x3ffffffU);
@@ -455,7 +460,7 @@ V3 aimPoint(const AimActor &a,V3 root,bool head) {
 }
 void resetAimTarget() {std::lock_guard<std::mutex> lock(aimMutex);aimHasChosen=false;aimRange=0;}
 void tickAimContext() {
-    if(!aimEnabled.load(std::memory_order_relaxed)&&!triggerEnabled.load())return;
+    if(!aimEnabled.load(std::memory_order_relaxed)&&!triggerEnabled.load()&&!regularAimEnabled.load())return;
     Local s;Weapon w;float range=0,health=0;uint32_t state=0;bool valid=false;
     NSString *reason=@"Ожидание персонажа или несовпадение UUID клиента";
     if(getLocal(s)) {
@@ -656,20 +661,9 @@ void tickWaypoint() {
 
 }
 
-// The on-disk bridge passes its original trampoline as argument five.
-// No text protection changes, JIT pages or runtime instruction writes are used.
-extern "C" __attribute__((used,visibility("default")))
-uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *to,AimQueue original) noexcept {
-    if(!original)return 0;
-    aimCallbacks.fetch_add(1,std::memory_order_relaxed);
-    // A queue callback is a local shot event, not confirmation of damage/hit.
-    @autoreleasepool {
-        Local local;float hp=0;
-        if(getLocal(local)&&reinterpret_cast<uint64_t>(owner)==local.ped&&
-           !local.vehicle&&read(local.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0)
-            ownShotEvents.fetch_add(1,std::memory_order_relaxed);
-    }
-    V3 output{};bool redirect=false;
+namespace {
+bool adjustedShot21(void *owner,uint32_t weapon,const V3 *from,const V3 *to,V3 &output) noexcept {
+    bool redirect=false;
     if(aimEnabled.load(std::memory_order_relaxed)) {
         @autoreleasepool {
             AimActor chosen{};BRAim::View view{};bool selected=false,head=false;double miss=0,received=0;uint64_t generation=0;
@@ -695,11 +689,18 @@ uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *
                 }
                 Matrix camera{};const V3 target=aimPoint(chosen,root,head);
                 const uint64_t info=weapon<255?weaponDefinition(s.base,uint8_t(weapon)):0;uint32_t fire=0;
-                if(sameNick&&info&&read(info+0x20,fire)&&fire==1&&read(s.base+0x22892a0+0x900,camera)) {
+                if(sameNick&&info&&read(info+0x20,fire)&&(fire==1||fire==4)&&read(s.base+0x22892a0+0x900,camera)) {
                     std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());
                     BRAim::Vec adjusted{};
                     if(BRAim::score(view,aimVec(target))>=0&&BRAim::endpoint(aimVec(start),aimVec(end),aimVec(target),adjusted)) {
-                        if(BRAim::skip(arc4random_uniform(10000),miss))aimSkipped.fetch_add(1,std::memory_order_relaxed);
+                        uint32_t frame=0;bool skip=false;
+                        if(!read(s.base+0x2f348e0,frame))return false;
+                        {static std::mutex rollMutex;static uint32_t tick=UINT32_MAX,kind=0;static uint64_t ownerPed=0,config=0;static bool missed=false;
+                            std::lock_guard<std::mutex> lock(rollMutex);
+                            if(tick!=frame||kind!=weapon||ownerPed!=s.ped||config!=generation){tick=frame;kind=weapon;ownerPed=s.ped;config=generation;missed=BRAim::skip(arc4random_uniform(10000),miss);}
+                            skip=missed;
+                        }
+                        if(skip)aimSkipped.fetch_add(1,std::memory_order_relaxed);
                         else {
                             std::lock_guard<std::mutex> lock(aimMutex);
                             if(generation==aimConfigGeneration&&aimSettings.enabled&&!aimSettings.excluded[chosen.id]&&!aimSettings.names.count(chosen.nick.data())) {
@@ -712,6 +713,24 @@ uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *
         }
     }
     if(redirect&&!aimEnabled.load(std::memory_order_relaxed))redirect=false;
+    return redirect;
+}
+}
+
+// The on-disk bridge passes its original trampoline as argument five.
+// No text protection changes, JIT pages or runtime instruction writes are used.
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *to,AimQueue original) noexcept {
+    if(!original)return 0;
+    aimCallbacks.fetch_add(1,std::memory_order_relaxed);
+    // A queue callback is a local shot event, not confirmation of damage/hit.
+    @autoreleasepool {
+        Local local;float hp=0;
+        if(getLocal(local)&&reinterpret_cast<uint64_t>(owner)==local.ped&&
+           !local.vehicle&&read(local.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0)
+            ownShotEvents.fetch_add(1,std::memory_order_relaxed);
+    }
+    V3 output{};const bool redirect=adjustedShot21(owner,weapon,from,to,output);
     if(redirect)aimRedirects.fetch_add(1,std::memory_order_relaxed);
     return original(owner,weapon,from,redirect?&output:to);
 }
@@ -854,7 +873,109 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
     @autoreleasepool {Local s;return liveConnected(s)&&owner==s.local?1:controllable;}
 }
 
+namespace {
+thread_local bool ownImpact21=false;
+uint64_t mainBase21() {
+    const mach_header *header=_dyld_get_image_header(0);if(!header||header->magic!=MH_MAGIC_64)return 0;
+    const uint8_t uuid[16]={0x3e,0x60,0x09,0x54,0xda,0x9e,0x31,0x16,0x9c,0xf2,0xbb,0xae,0xfe,0xdc,0x13,0x9c};
+    const uint8_t *p=reinterpret_cast<const uint8_t *>(header)+sizeof(mach_header_64);
+    for(uint32_t i=0;i<header->ncmds;++i){const load_command *c=reinterpret_cast<const load_command *>(p);if(c->cmdsize<8)return 0;
+        if(c->cmd==LC_UUID&&c->cmdsize==sizeof(uuid_command))return std::memcmp(reinterpret_cast<const uuid_command *>(p)->uuid,uuid,16)==0?reinterpret_cast<uint64_t>(header):0;p+=c->cmdsize;}
+    return 0;
+}
+void audioEvent21(NSString *name) {
+    dispatch_async(dispatch_get_main_queue(),^{[[NSNotificationCenter defaultCenter] postNotificationName:name object:nil];});
+}
+using Trace21=void(*)(void *,void *,const V3 *,const V3 *);
+using Impact21=void(*)(void *,void *,void *,const V3 *,const V3 *,void *,uint32_t);
+using Chat21=void(*)(const char *);
+}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuTrace21(void *weapon,void *owner,const V3 *from,const V3 *to,Trace21 original) noexcept {
+    if(!original)return;
+    V3 point{};uint8_t id=255;const bool redirect=read(reinterpret_cast<uint64_t>(weapon),id)&&adjustedShot21(owner,id,from,to,point);
+    if(redirect)aimRedirects.fetch_add(1,std::memory_order_relaxed);
+    original(weapon,owner,from,redirect?&point:to);
+}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuImpact21(void *weapon,void *owner,void *victim,const V3 *from,const V3 *to,void *collision,uint32_t damage,Impact21 original) noexcept {
+    if(!original)return;
+    const bool before=ownImpact21;ownImpact21=false;
+    if(customHitEnabled.load()){@autoreleasepool {Local s;ownImpact21=liveConnected(s)&&reinterpret_cast<uint64_t>(owner)==s.ped&&victim;}}
+    original(weapon,owner,victim,from,to,collision,damage);ownImpact21=before;
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuSound21(uint64_t,uint64_t entity,uint64_t event,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
+    const uint64_t base=verifiedProjectionBase.load();
+    if(!base)return 1;
+    if(customHitEnabled.load()&&ownImpact21&&caller==base+0xb0f410&&(event==0x3d||event==0x3e)) {audioEvent21(@"ReactHitSound21");return 0;}
+    if(customShotEnabled.load()&&caller==base+0xb0bb1c&&event==0x37) {
+        @autoreleasepool {Local s;uint32_t handle=0;if(liveConnected(s)&&read(s.ped+0x174,handle)&&entity==handle){audioEvent21(@"ReactShotSound21");return 0;}}
+    }
+    return 1;
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuLogo21() noexcept {return hideLogoEnabled.load()?0:1;}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuChat21(const char *input,Chat21 original) noexcept {
+    if(!original)return;
+    if(localCommandsEnabled.load()&&input) {
+        char buffer[12]{};const bool readable=copy(reinterpret_cast<uint64_t>(input),buffer,sizeof(buffer));
+        if(readable&&!std::strcmp(buffer,"/clearchat")){dispatch_async(dispatch_get_main_queue(),^{[[NSNotificationCenter defaultCenter] postNotificationName:@"ReactClearChat21" object:nil];});return;}
+    }
+    original(BRMenuChat19(input));
+}
+
+namespace {
+void moveCamera21(const AimActor &target,double now) {
+    static double last=0;const double dt=last>0?std::clamp(now-last,0.001,0.05):1.0/60;last=now;
+    if(!regularAimEnabled.load())return;
+    Local s;Weapon weapon;uint16_t disabled=0;float hp=0;uint32_t state=0;V3 root{};
+    if(!liveConnected(s)||s.vehicle||!getWeapon(s,weapon)||!sameWeapon(s,weapon)||
+       !read(s.base+0x2ed1638+0x10e,disabled)||disabled||!read(target.ped+0x4b0,hp)||!read(target.ped+0x494,state)||
+       !BRAim::living(hp,hp,state)||!read(target.ped+0x38,root)||!finite(root))return;
+    using Aim=int32_t(*)(void *);if(!reinterpret_cast<Aim>(s.base+0xf7248)(reinterpret_cast<void *>(s.base+0x2ed1638)))return;
+    uint8_t active=0;if(!read(s.base+0x22892a0+0x94,active)||active>=3)return;
+    const uint64_t camera=s.base+0x22892a0+0x1a8+uint64_t(active)*0x1e8;
+    uint64_t owner=0;float alpha=0,beta=0;V3 position{},front{};
+    if(!read(camera+0x1c8,owner)||owner!=s.ped||!read(camera+0xac,alpha)||!read(camera+0xbc,beta)||!std::isfinite(alpha)||!std::isfinite(beta)||
+       !read(camera+0x18c,position)||!finite(position)||!read(camera+0x180,front)||!finite(front))return;
+    // Aiming cameras construct front=(-cos(beta)*cos(alpha),-sin(beta)*cos(alpha),sin(alpha)) at 9f878.
+    const V3 predicted{float(-std::cos(beta)*std::cos(alpha)),float(-std::sin(beta)*std::cos(alpha)),float(std::sin(alpha))};
+    if(predicted.x*front.x+predicted.y*front.y+predicted.z*front.z<0.9)return;
+    const V3 point=aimPoint(target,root,aimSettings.head);
+    if(regularAimVisible.load()) {
+        if(!anchorAt(s.base,0x11b49c,0xd10443ffU))return;
+        using Clear=bool(*)(const V3 *,const V3 *,bool,bool,bool,bool,bool,bool,bool);
+        if(!reinterpret_cast<Clear>(s.base+0x11b49c)(&position,&point,true,true,false,true,false,false,false))return;
+    }
+    const double dx=point.x-position.x,dy=point.y-position.y,dz=point.z-position.z;
+    float nextAlpha=0,nextBeta=0;
+    if(!React21::cameraStep(alpha,beta,dx,dy,dz,dt,aimSmoothSeconds.load(),nextAlpha,nextBeta)||!sameLocal(s))return;
+    (void)writeData(camera+0xac,nextAlpha);(void)writeData(camera+0xbc,nextBeta);
+}
+}
+
 @implementation BRPlayerSnapshot
++ (BOOL)clearChatForController:(NSObject *)controller {
+    if(!NSThread.isMainThread||!controller)return NO;
+    const uint64_t base=mainBase21();if(!base)return NO;
+    NSString *name=NSStringFromClass(controller.class);
+    const uint64_t field=[name isEqualToString:@"BrBase.ChatViewController"]?0x1b34c30:([name isEqualToString:@"BrBase.EventChatViewController"]?0x1b2afc8:0);
+    if(!field)return NO;
+    uint64_t offset=0,old=0,empty=0,count=0,emptyCount=1;
+    const uint64_t object=reinterpret_cast<uint64_t>((__bridge void *)controller);
+    if(!read(base+field,offset)||offset<16||offset+8>class_getInstanceSize(controller.class)||
+       !read(object+offset,old)||!old||!read(old+0x10,count)||count>100000||
+       !read(base+0x19b58d8,empty)||!empty||!read(empty+0x10,emptyCount)||emptyCount!=0)return NO;
+    using Retain=void *(*)(void *);using Release=void(*)(void *);
+    auto retain=reinterpret_cast<Retain>(dlsym(RTLD_DEFAULT,"swift_bridgeObjectRetain"));
+    auto release=reinterpret_cast<Release>(dlsym(RTLD_DEFAULT,"swift_bridgeObjectRelease"));
+    if(!retain||!release)return NO;
+    retain(reinterpret_cast<void *>(empty));
+    if(!writeData(object+offset,empty)){release(reinterpret_cast<void *>(empty));return NO;}
+    release(reinterpret_cast<void *>(old));return YES;
+}
 + (NSString *)extensionStatus {return extensionBridgeReady(imageBase())?@"Дополнительные настройки подключены":@"Нужен обновлённый IPA";}
 + (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules {
     std::unordered_map<std::string,std::string> next;
@@ -870,6 +991,7 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
     if(!NSThread.isMainThread)return @"Отправляй команду из меню";
     const uint64_t base=imageBase();Local owner;
     if(!extensionBridgeReady(base)||!getLocal(owner))return @"Открой игру и подключись к серверу";
+    if([command isEqualToString:@"/clearchat"]){[[NSNotificationCenter defaultCenter] postNotificationName:@"ReactClearChat21" object:nil];return @"Чат очищен локально";}
     NSData *utf8=[command dataUsingEncoding:NSUTF8StringEncoding];
     if(![command hasPrefix:@"/"]||utf8.length<2||utf8.length>512||[command rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location!=NSNotFound)return @"Некорректная команда";
     // The verified exported routine immediately copies the UTF-8 string into its queued job.
@@ -913,7 +1035,7 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
     auto &settings=aimSettings;auto &view=settings.view;view.width=width;view.height=height;view.stretch=stretch;
     if(hasCamera)std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());
     aimHasChosen=false;double x=0,y=0;
-    if(settings.enabled&&hasCamera&&aimRange>0&&now-aimReceived<=0.3) {
+    if((settings.enabled||regularAimEnabled.load())&&hasCamera&&aimRange>0&&now-aimReceived<=0.3) {
         std::array<BRAim::Candidate,128> candidates{};
         for(size_t i=0;i<aimCount;++i) {
             const auto &a=aimActors[i];
@@ -924,6 +1046,7 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
         if(selected.found) {aimChosen=aimActors[selected.index];aimHasChosen=true;}
 
     }
+    if(aimHasChosen&&regularAimEnabled.load())moveCamera21(aimChosen,now);
     if(aimHasChosen) {
         // Label above the selected actor; target itself can be chest or head.
         V3 p=aimPoint(aimChosen,aimChosen.root,true);p.z+=0.35f;
@@ -947,7 +1070,7 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};runTrack={};triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        const Flight old=flight;flight={};assists={};runTrack={};regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -961,6 +1084,15 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
         const bool extended=extensionBridgeReady(imageBase());
+        regularAimEnabled.store(extended&&settings[@"regularAim"].boolValue);
+        const double smooth=settings[@"aimSmooth"].doubleValue;
+        aimSmoothSeconds.store(std::isfinite(smooth)?std::clamp(smooth,0.02,1.0):0.2);
+        regularAimVisible.store(settings[@"regularAimVisible"].boolValue);
+        customShotEnabled.store(extended&&settings[@"customShotSound"].boolValue);
+        customHitEnabled.store(extended&&settings[@"customHitSound"].boolValue);
+        hideLogoEnabled.store(extended&&settings[@"hideServerLogo"].boolValue);
+        localCommandsEnabled.store(extended);
+
         triggerEnabled.store(extended&&settings[@"triggerBot"].boolValue);
         triggerRadius.store(std::clamp(settings[@"triggerRadius"].intValue,2,30));
         triggerDelayMs.store(std::clamp(settings[@"triggerDelay"].intValue,0,500));
@@ -1171,7 +1303,7 @@ uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
         }
         if([action isEqualToString:@"skinSet"]||[action isEqualToString:@"carSet"]||[action isEqualToString:@"weaponGive"]) {
             double id=values[@"id"].doubleValue,ammo=values[@"ammo"].doubleValue;
-            if(!std::isfinite(id)||id<0||id>1000000||id!=std::floor(id))return @"Некорректный ID модели";
+            if(!std::isfinite(id)||id<0||id>UINT32_MAX||id!=std::floor(id))return @"Некорректный ID модели";
             if([action isEqualToString:@"weaponGive"]&&(!std::isfinite(ammo)||ammo<1||ammo>99999||ammo!=std::floor(ammo)))return @"Патроны: 1–99999";
             lastAction=now;
             ModelAction kind=[action isEqualToString:@"skinSet"]?ModelAction::Skin:([action isEqualToString:@"carSet"]?ModelAction::Car:ModelAction::Weapon);

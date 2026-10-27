@@ -63,6 +63,7 @@ public final class BRMenuEntry: NSObject {
         guard licenseAllowed else { licenseGate.present(in: scene); return }
         #endif
         let menu = DiagnosticMenu()
+        menu.clearChatControllerProvider = { BRPlayerSnapshot.clearChat(forController: $0) }
         menu.playerProvider = { walls, distance in BRPlayerSnapshot.snapshot(ignoringRenderFlags: walls, maxDistance: distance) }
         menu.commandSendProvider = { BRPlayerSnapshot.sendChatCommand($0) }
         menu.commandAliasesConfigurationProvider = { BRPlayerSnapshot.configureChatAliases(ReactCommandAliases.mapping($0)) }

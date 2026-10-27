@@ -17,3 +17,15 @@ inline bool runStep(float dx,float dy,float vx,float vy,double elapsed,double fa
     outX=float(dx*(factor-1));outY=float(dy*(factor-1));return true;
 }
 }
+
+namespace React21 {
+inline bool cameraStep(double alpha,double beta,double dx,double dy,double dz,double elapsed,double smooth,float &outAlpha,float &outBeta) {
+    if(!std::isfinite(alpha)||!std::isfinite(beta)||!std::isfinite(dx)||!std::isfinite(dy)||!std::isfinite(dz)||!std::isfinite(elapsed)||!std::isfinite(smooth)||elapsed<=0||elapsed>0.1||smooth<0.02||smooth>1)return false;
+    const double horizontal=std::hypot(dx,dy);if(horizontal<0.001)return false;
+    const double desiredAlpha=std::clamp(std::atan2(dz,horizontal),-1.4,0.75),desiredBeta=std::atan2(-dy,-dx);
+    constexpr double pi=3.14159265358979323846;
+    const double gain=-std::expm1(-elapsed/smooth),difference=std::remainder(desiredBeta-beta,2*pi);
+    outAlpha=float(alpha+(desiredAlpha-alpha)*gain);outBeta=float(std::remainder(beta+difference*gain,2*pi));
+    return std::isfinite(outAlpha)&&std::isfinite(outBeta);
+}
+}

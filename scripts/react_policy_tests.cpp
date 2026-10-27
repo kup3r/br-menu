@@ -24,5 +24,15 @@ int main(){
     assert(!runStep(0,0,0.1f,0,0.05,2,x,y)); // idle
     assert(!runStep(-0.1f,0,0.1f,0,0.05,2,x,y)); // collision correction opposing movement
     assert(!runStep(0.2f,0,0,0,0.05,2,x,y));
+    // A wrapped yaw takes the short path and smoothing is independent of 30/60 Hz.
+    float a=0,b=0;
+    assert(React21::cameraStep(0,3.13,1,0.01,0,1.0/60,0.2,a,b));
+    assert(std::remainder(double(b)-3.13,2*3.141592653589793)>0 && std::remainder(double(b)-3.13,2*3.141592653589793)<0.01);
+    float a30=0,b30=0,a60=0,b60=0;
+    for(int i=0;i<30;++i)assert(React21::cameraStep(a30,b30,10,10,3,1.0/30,0.3,a30,b30));
+    for(int i=0;i<60;++i)assert(React21::cameraStep(a60,b60,10,10,3,1.0/60,0.3,a60,b60));
+    assert(std::abs(a30-a60)<0.00001&&std::abs(b30-b60)<0.00001);
+    assert(!React21::cameraStep(0,0,0,0,0,1.0/60,0.2,a,b));
+    assert(!React21::cameraStep(0,0,1,1,1,1.0/60,0,a,b));
     std::cout<<"FOV, clock packing, weather bounds and disabled fallbacks passed\n";
 }

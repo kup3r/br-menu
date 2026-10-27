@@ -22,6 +22,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public var projectionProvider: (() -> [Double])?
     public var aspectConfigurationProvider: ((Double) -> Void)?
     public var aspectStateProvider: (() -> [String: Any])?
+    public var clearChatControllerProvider: ((NSObject) -> Bool)?
     public var aimFrameProvider: ((Double, Double, Double) -> [String: Any])?
     public var aimConfigurationProvider: ((Bool, Double, Double, Bool, String) -> Void)?
     private var lastAimState: [String: Any] = [:]
@@ -46,7 +47,10 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public var extensionStatusProvider: (() -> String)?
     public var shotEventProvider: (() -> UInt64)?
     private var lastShotEvent: UInt64?
-    private let shotAudio = ReactShotAudio()
+    private let shotAudio = ReactShotAudio(kind: "shot")
+    private let hitAudio = ReactShotAudio(kind: "hit")
+    private let hostUI = ReactHostUI()
+    private var importingHitSound = false
     private var dragOrigin: CGPoint?
     private var timer: Timer?
     private var link: CADisplayLink?
@@ -98,6 +102,9 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateMetrics() }
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(replacementShot), name: Notification.Name("ReactShotSound21"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(replacementHit), name: Notification.Name("ReactHitSound21"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(clearLocalChat), name: Notification.Name("ReactClearChat21"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIScene.didEnterBackgroundNotification, object: scene)
         NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIScene.didActivateNotification, object: scene)
         append("React Modifications подключено")
@@ -107,7 +114,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     /// Call when disconnecting the scene; releases CADisplayLink's target reference.
     public func uninstall() {
         controlStopProvider?()
-        shotAudio.stop(); lastShotEvent = nil
+        shotAudio.stop(); hitAudio.stop(); hostUI.restore(); lastShotEvent = nil
         restoreStretch()
         espGeneration += 1
         timer?.invalidate(); timer = nil
@@ -161,18 +168,22 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                   shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
     @objc private func toggleMenu() { perform("collapse") }
-    @objc private func background() { shotAudio.stop(); lastShotEvent = nil; restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
+    @objc private func replacementShot() { if MenuPreferences.shared.flag("customShotSound"), scene?.activationState == .foregroundActive { shotAudio.play() } }
+    @objc private func replacementHit() { if MenuPreferences.shared.flag("customHitSound"), scene?.activationState == .foregroundActive { hitAudio.play() } }
+    @objc private func clearLocalChat() {
+        guard let scene else { return }
+        let count = hostUI.clearChat(in: scene, clear: clearChatControllerProvider)
+        host.actionStatus.text = count > 0 ? "Чат очищен" : "Окно игрового чата ещё не найдено"
+    }
+    @objc private func background() { shotAudio.stop(); hitAudio.stop(); hostUI.restore(); lastShotEvent = nil; restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
     @objc private func foreground() {
         sampledController = nil; sampledTime = 0; gameRate = nil
         frames = 0; previousTimestamp = 0; sampleStart = 0; refreshRate = 0; controlTimestamp = 0
         configureControls(); link?.isPaused = false; placeWindow(); append("Возврат в приложение")
     }
     @objc private func tick(_ display: CADisplayLink) {
-        if scene?.activationState == .foregroundActive, let count = shotEventProvider?() {
-            if let previous = lastShotEvent, count > previous, MenuPreferences.shared.flag("customShotSound") {
-                shotAudio.play()
-            }
-            lastShotEvent = count
+        if let scene, scene.activationState == .foregroundActive {
+            hostUI.update(in: scene, balance: MenuPreferences.shared.flag("visualBalance") ? MenuPreferences.shared.visualBalance : nil)
         }
         if scene?.activationState == .foregroundActive, MenuPreferences.shared.needsPlayers {
             refreshPlayers()
@@ -182,7 +193,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
             decor.renderESP()
         } else { decor.hideESP() }
         let prefs = MenuPreferences.shared
-        if (prefs.flag("silentAim") || prefs.flag("triggerBot")), scene?.activationState == .foregroundActive {
+        if (prefs.flag("silentAim") || prefs.flag("triggerBot") || prefs.flag("regularAim")), scene?.activationState == .foregroundActive {
             lastAimState = aimFrameProvider?(Double(decor.bounds.width), Double(decor.bounds.height), Double(decor.horizontalScale)) ?? [:]
             decor.updateAim(lastAimState)
         } else { decor.hideAim(); lastAimState = [:] }
@@ -281,7 +292,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         espBusy = true
         let generation = espGeneration
         let statusProvider = playerStatusProvider
-        let walls = MenuPreferences.shared.flag("espWalls", fallback: true) || MenuPreferences.shared.flag("silentAim")
+        let walls = MenuPreferences.shared.flag("espWalls", fallback: true) || MenuPreferences.shared.flag("silentAim") || MenuPreferences.shared.flag("regularAim")
         let maxDistance = MenuPreferences.shared.maxDistance
         espQueue.async { [weak self] in
             let started = CACurrentMediaTime()
@@ -415,8 +426,13 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         case "aspectOriginal": MenuPreferences.shared.stretch = 1; host.setStretch(1); configureControls(); updateMetrics()
         case "aspectTablet": MenuPreferences.shared.stretch = 1.5; host.setStretch(1.5); configureControls(); updateMetrics()
         case "aspectWide": MenuPreferences.shared.stretch = 1.6; host.setStretch(1.6); configureControls(); updateMetrics()
+        case "hitPreview": hitAudio.play()
+        case "hitImport": importingHitSound = true; importShotSound()
+        case "hitReset": hitAudio.reset(); host.actionStatus.text = "Выбран звук попадания"
+        case "clearChat": clearLocalChat()
+        case "visualBalanceSet": requestVisualBalance()
         case "shotPreview": shotAudio.play()
-        case "shotImport": importShotSound()
+        case "shotImport": importingHitSound = false; importShotSound()
         case "shotReset": shotAudio.reset(); host.actionStatus.text = "Выбран мягкий щелчок"
         case "commandCompose": composeCommand()
         case "commandAliases": editCommandAliases()
@@ -426,6 +442,10 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     }
     private func configureControls() {
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
+        values["regularAim"] = MenuPreferences.shared.flag("regularAim") && host.collapsed ? 1 : 0
+        values["regularAimVisible"] = MenuPreferences.shared.flag("regularAimVisible", fallback: true) ? 1 : 0
+        values["aimSmooth"] = MenuPreferences.shared.aimSmooth
+        host.applyTheme()
         values["triggerBot"] = MenuPreferences.shared.flag("triggerBot") && host.collapsed ? 1 : 0
         values["triggerAimOnly"] = MenuPreferences.shared.flag("triggerAimOnly", fallback: true) ? 1 : 0
         values["triggerRadius"] = MenuPreferences.shared.triggerRadius
@@ -460,7 +480,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         defer { appWindow?.makeKey() }
         guard let url = urls.first else { return }
-        do { try shotAudio.importFile(url); host.actionStatus.text = "Звук выстрела сохранён" }
+        do { try (importingHitSound ? hitAudio : shotAudio).importFile(url); host.actionStatus.text = importingHitSound ? "Звук попадания сохранён" : "Звук выстрела сохранён" }
         catch { host.actionStatus.text = "Нужен аудиофайл до 1 МиБ и длительностью до 2 секунд" }
     }
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { appWindow?.makeKey() }
@@ -523,6 +543,19 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         })
         window?.makeKey(); host.present(alert, animated: MenuPreferences.shared.animations)
     }
+    private func requestVisualBalance() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Визуальный баланс", message: "Сумма в интерфейсе на этом устройстве", preferredStyle: .alert)
+        alert.addTextField { field in field.keyboardType = .numberPad; field.text = String(format: "%.0f", MenuPreferences.shared.visualBalance) }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }; self.appWindow?.makeKey()
+            guard let text = alert?.textFields?.first?.text, let value = Double(text), value.isFinite, value >= 0, value <= 999_999_999_999, value.rounded() == value else { self.host.actionStatus.text = "Введи целую сумму от 0 до 999999999999"; return }
+            MenuPreferences.shared.visualBalance = value; MenuPreferences.shared.set("visualBalance", true)
+            self.host.actionStatus.text = "Визуальный баланс изменён"; self.configureControls()
+        })
+        window?.makeKey(); host.present(alert, animated: MenuPreferences.shared.animations)
+    }
     private func requestAppearance(_ action: String) {
         guard host.presentedViewController == nil else { return }
         let state = localStateProvider?() ?? [:]
@@ -540,7 +573,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
         alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
             guard let self else { return }; self.appWindow?.makeKey()
-            guard let fields = alert?.textFields, let text = fields.first?.text, let id = Int(text), (0...1000000).contains(id) else {
+            guard let fields = alert?.textFields, let text = fields.first?.text, let id = Int(text), (0...Int(UInt32.max)).contains(id) else {
                 self.host.actionStatus.text = "Некорректный ID"; return
             }
             var values = ["id": Double(id)]
@@ -584,7 +617,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot"]
+    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
@@ -599,6 +632,14 @@ private final class MenuPreferences {
     var triggerDelay: Double {
         get { defaults.object(forKey: "triggerDelay") == nil ? 120 : max(0, min(500, defaults.double(forKey: "triggerDelay"))) }
         set { defaults.set(newValue, forKey: "triggerDelay") }
+    }
+    var aimSmooth: Double {
+        get { defaults.object(forKey: "aimSmooth") == nil ? 0.2 : max(0.02, min(1, defaults.double(forKey: "aimSmooth"))) }
+        set { defaults.set(newValue, forKey: "aimSmooth") }
+    }
+    var visualBalance: Double {
+        get { defaults.object(forKey: "visualBalanceValue") == nil ? 1_000_000 : max(0, min(999_999_999_999, defaults.double(forKey: "visualBalanceValue"))) }
+        set { defaults.set(newValue, forKey: "visualBalanceValue") }
     }
     var runMultiplier: Double {
         get { defaults.object(forKey: "runMultiplier") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "runMultiplier"))) }
@@ -668,7 +709,7 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "hopPower") == nil ? 1 : max(1, min(5, defaults.double(forKey: "hopPower"))) }
         set { defaults.set(newValue, forKey: "hopPower") }
     }
-    var needsPlayers: Bool { flag("esp") || flag("silentAim") || flag("triggerBot") }
+    var needsPlayers: Bool { flag("esp") || flag("silentAim") || flag("triggerBot") || flag("regularAim") }
     var aimMiss: Double {
         get { max(0, min(100, defaults.double(forKey: "aimMiss"))) }
         set { defaults.set(newValue, forKey: "aimMiss") }
@@ -687,13 +728,26 @@ private final class MenuPreferences {
     }
     var animations: Bool { flag("animations", fallback: true) }
     var large: Bool { flag("large") }
-    var accent: UIColor { defaults.integer(forKey: "accent") == 1 ? .systemOrange : .systemCyan }
+    static let palette: [(String, UIColor)] = [("Лёд", .systemCyan), ("Огонь", .systemOrange), ("Аметист", .systemPurple), ("Лайм", .systemGreen), ("Роза", .systemPink), ("Золото", .systemYellow), ("Синий", .systemBlue), ("Мята", .systemMint), ("Красный", .systemRed), ("Белый", .white), ("Индиго", .systemIndigo), ("Бирюза", .systemTeal)]
+    var accent: UIColor {
+        if accentIndex == Self.palette.count, let rgba = defaults.array(forKey: "customAccent") as? [Double], rgba.count == 4 {
+            return UIColor(red: rgba[0], green: rgba[1], blue: rgba[2], alpha: 1)
+        }
+        return Self.palette[max(0, min(Self.palette.count-1, accentIndex))].1
+    }
     var accentIndex: Int { get { defaults.integer(forKey: "accent") } set { defaults.set(newValue, forKey: "accent") } }
+    func setCustomAccent(_ color: UIColor) {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return }
+        defaults.set([Double(red), Double(green), Double(blue), 1], forKey: "customAccent"); accentIndex = Self.palette.count
+    }
+
 }
 
 @MainActor
 private final class DiagnosticDecor: UIView {
     private let hud = UILabel()
+    private let brand = UILabel()
     private let aimCircle = CAShapeLayer(), aimCircleOutline = CAShapeLayer()
     private let shootLabel = CATextLayer()
     func hideAim() {
@@ -703,7 +757,7 @@ private final class DiagnosticDecor: UIView {
     }
     func updateAim(_ state: [String: Any]) {
         let prefs = MenuPreferences.shared
-        guard prefs.flag("silentAim") else { hideAim(); return }
+        guard prefs.flag("silentAim") || prefs.flag("regularAim") else { hideAim(); return }
         let armed = (state["ready"] as? NSNumber)?.boolValue == true
         let id = (state["target"] as? NSNumber)?.intValue ?? -1
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -865,10 +919,15 @@ private final class DiagnosticDecor: UIView {
         layer.addSublayer(shootLabel)
         hud.accessibilityIdentifier = "diagnostics.hud"
         addSubview(hud)
+        brand.text = "React Modifications"; brand.textAlignment = .center
+        brand.font = .systemFont(ofSize: 12, weight: .semibold)
+        brand.layer.shadowColor = UIColor.black.cgColor; brand.layer.shadowOpacity = 0.9; brand.layer.shadowRadius = 2
+        brand.accessibilityIdentifier = "diagnostics.brand"; addSubview(brand)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(text: String, insets: UIEdgeInsets) {
         safe = insets; hud.text = "  " + text.replacingOccurrences(of: "\n", with: "\n  ")
+        brand.textColor = MenuPreferences.shared.accent
         hud.textColor = MenuPreferences.shared.accent
         hud.isHidden = !MenuPreferences.shared.flag("hud", fallback: true)
         setNeedsLayout(); setNeedsDisplay()
@@ -879,6 +938,7 @@ private final class DiagnosticDecor: UIView {
         for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { shape.frame = bounds }
         CATransaction.commit()
         renderESP()
+        brand.frame = CGRect(x: safe.left + 10, y: max(safe.top, bounds.height-safe.bottom-24), width: max(0, bounds.width-safe.left-safe.right-20), height: 20)
         hud.frame = CGRect(x: safe.left + 12, y: safe.top + 10, width: min(310, bounds.width - safe.left - safe.right - 24), height: 46)
     }
     override func draw(_ rect: CGRect) {
@@ -1137,11 +1197,14 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
-        pages[5].addArrangedSubview(toggle("Доп. звук выстрела", key: "customShotSound"))
-        pages[5].addArrangedSubview(note("Воспроизводится поверх звука игры"))
+        pages[5].addArrangedSubview(toggle("Заменить звук выстрела", key: "customShotSound"))
         pages[5].addArrangedSubview(button("Прослушать звук", "shotPreview"))
         pages[5].addArrangedSubview(button("Импортировать звук", "shotImport"))
         pages[5].addArrangedSubview(button("Мягкий щелчок", "shotReset"))
+        pages[5].addArrangedSubview(toggle("Заменить звук попадания", key: "customHitSound"))
+        pages[5].addArrangedSubview(button("Прослушать попадание", "hitPreview"))
+        pages[5].addArrangedSubview(button("Импортировать звук попадания", "hitImport"))
+        pages[5].addArrangedSubview(button("Стандартный звук попадания", "hitReset"))
         pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
         pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
         pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
@@ -1154,6 +1217,16 @@ private final class MenuController: UIViewController {
         fireRate.accessibilityLabel = "Множитель скорострельности"
         fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
+        pages[6].addArrangedSubview(toggle("Обычный Aim · поворот камеры", key: "regularAim"))
+        pages[6].addArrangedSubview(toggle("Aim: проверять препятствия", key: "regularAimVisible", fallback: true))
+        let smoothLabel = note(String(format: "Плавность Aim: %.0f мс", MenuPreferences.shared.aimSmooth * 1000))
+        let smooth = UISlider(); smooth.minimumValue = 0.02; smooth.maximumValue = 1; smooth.value = Float(MenuPreferences.shared.aimSmooth)
+        smooth.accessibilityLabel = "Плавность обычного Aim"
+        smooth.addAction(UIAction { [weak self, weak smooth] _ in
+            MenuPreferences.shared.aimSmooth = Double(smooth?.value ?? 0.2)
+            smoothLabel.text = String(format: "Плавность Aim: %.0f мс", MenuPreferences.shared.aimSmooth * 1000); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(smoothLabel); pages[6].addArrangedSubview(smooth)
         pages[6].addArrangedSubview(toggle("TriggerBot", key: "triggerBot"))
         pages[6].addArrangedSubview(toggle("TriggerBot только при прицеливании", key: "triggerAimOnly", fallback: true))
         let triggerRadiusLabel = note(String(format: "Зона TriggerBot: %.0f pt", MenuPreferences.shared.triggerRadius))
@@ -1249,6 +1322,10 @@ private final class MenuController: UIViewController {
         pages[7].addArrangedSubview(toggle("Сокращения в чате", key: "aliasesAuto"))
         pages[7].addArrangedSubview(button("Быстрая команда", "commandCompose"))
         pages[7].addArrangedSubview(button("Сокращения команд", "commandAliases"))
+        pages[7].addArrangedSubview(toggle("Скрыть логотип сервера", key: "hideServerLogo"))
+        pages[7].addArrangedSubview(button("Очистить чат · /clearchat", "clearChat"))
+        pages[7].addArrangedSubview(toggle("Визуальный баланс", key: "visualBalance"))
+        pages[7].addArrangedSubview(button("Установить визуальный баланс", "visualBalanceSet"))
         pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
         pages[7].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
         pages[7].addArrangedSubview(toggle("Плавающая кнопка", key: "bubble", fallback: true))
@@ -1260,13 +1337,25 @@ private final class MenuController: UIViewController {
         opacity.addAction(UIAction { [weak self, weak opacity] _ in
             MenuPreferences.shared.opacity = CGFloat(opacity?.value ?? 1); self?.onChange?()
         }, for: .valueChanged); pages[7].addArrangedSubview(opacity)
-        let colors = UISegmentedControl(items: ["Лёд", "Огонь"]); colors.selectedSegmentIndex = MenuPreferences.shared.accentIndex
-        colors.addAction(UIAction { [weak self, weak colors] _ in
-            MenuPreferences.shared.accentIndex = colors?.selectedSegmentIndex ?? 0
-            self?.coordinates.textColor = MenuPreferences.shared.accent
-            self?.view.layer.borderColor = MenuPreferences.shared.accent.withAlphaComponent(0.35).cgColor
-            self?.onChange?()
-        }, for: .valueChanged); pages[7].addArrangedSubview(colors)
+        pages[7].addArrangedSubview(note("Цвет темы"))
+        for start in stride(from: 0, to: MenuPreferences.palette.count, by: 3) {
+            let row = UIStackView(); row.spacing = 6; row.distribution = .fillEqually
+            for index in start..<min(start+3, MenuPreferences.palette.count) {
+                let item = MenuPreferences.palette[index], swatch = UIButton(type: .system)
+                var config = UIButton.Configuration.tinted(); config.title = item.0; config.baseForegroundColor = item.1; swatch.configuration = config
+                swatch.accessibilityIdentifier = "diagnostics.color.\(index)"
+                swatch.addAction(UIAction { [weak self] _ in
+                    MenuPreferences.shared.accentIndex = index; self?.applyTheme(); self?.onChange?()
+                }, for: .touchUpInside); row.addArrangedSubview(swatch)
+            }
+            pages[7].addArrangedSubview(row)
+        }
+        let customColor = UIColorWell(); customColor.title = "Свой цвет темы"; customColor.supportsAlpha = false
+        customColor.selectedColor = MenuPreferences.shared.accent; customColor.accessibilityLabel = "Свой цвет темы"
+        customColor.addAction(UIAction { [weak self, weak customColor] _ in
+            if let color = customColor?.selectedColor { MenuPreferences.shared.setCustomAccent(color); self?.applyTheme(); self?.onChange?() }
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(customColor)
         bubble.setTitle("RM", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
         bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Открыть React Modifications"
         bubble.addAction(UIAction { [weak self] _ in self?.onAction?("collapse") }, for: .touchUpInside)
@@ -1291,6 +1380,20 @@ private final class MenuController: UIViewController {
             self?.onChange?()
         }, for: .valueChanged)
         row.addArrangedSubview(label); row.addArrangedSubview(control); return row
+    }
+    func applyTheme() {
+        let accent = MenuPreferences.shared.accent
+        view.tintColor = accent; coordinates.textColor = accent; bubble.tintColor = accent
+        view.layer.borderColor = accent.withAlphaComponent(0.35).cgColor
+        func visit(_ root: UIView) {
+            if let control = root as? UISwitch { control.onTintColor = accent }
+            if let slider = root as? UISlider { slider.minimumTrackTintColor = accent }
+            if let button = root as? UIButton, button.accessibilityIdentifier?.hasPrefix("diagnostics.color.") != true {
+                var config = button.configuration; config?.baseForegroundColor = accent; button.configuration = config; button.tintColor = accent
+            }
+            root.subviews.forEach { visit($0) }
+        }
+        visit(view)
     }
     func syncControlToggles() {
         func visit(_ view: UIView) {
@@ -1360,16 +1463,18 @@ private final class PassthroughWindow: UIWindow {
 
 
 
-/// Additional local feedback. Does not replace or mute the game's audio session.
+/// Played only after the verified native audio event is suppressed.
 @MainActor
 private final class ReactShotAudio {
+    private let kind: String
+    init(kind: String) { self.kind = kind }
     private var players: [AVAudioPlayer] = []
     private var cached: Data?
     private var root: URL {
         (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory).appendingPathComponent("ReactModifications", isDirectory: true)
     }
-    private var file: URL { root.appendingPathComponent("shot.audio") }
+    private var file: URL { root.appendingPathComponent(kind + ".audio") }
     private enum ImportError: Error { case invalid }
     func importFile(_ url: URL) throws {
         let scoped = url.startAccessingSecurityScopedResource()
@@ -1384,17 +1489,17 @@ private final class ReactShotAudio {
         try data.write(to: file, options: .atomic)
         stop(); cached = data
     }
-    func reset() { stop(); try? FileManager.default.removeItem(at: file); cached = Self.click() }
+    func reset() { stop(); try? FileManager.default.removeItem(at: file); cached = Self.click(hit: kind == "hit") }
     func stop() { players.forEach { $0.stop() }; players.removeAll() }
     func play() {
-        if cached == nil { cached = (try? Data(contentsOf: file)) ?? Self.click() }
+        if cached == nil { cached = (try? Data(contentsOf: file)) ?? Self.click(hit: kind == "hit") }
         guard let data = cached, let player = try? AVAudioPlayer(data: data) else { return }
         players.removeAll { !$0.isPlaying }
         if players.count >= 4 { players.removeFirst().stop() }
-        player.volume = 0.35
+        player.volume = 0.7
         players.append(player); player.play()
     }
-    private static func click() -> Data {
+    private static func click(hit: Bool) -> Data {
         let sampleRate = 22_050, count = 1_323
         var data = Data()
         func ascii(_ text: String) { data.append(contentsOf: text.utf8) }
@@ -1408,7 +1513,7 @@ private final class ReactShotAudio {
         for index in 0..<count {
             let t = Double(index) / Double(sampleRate)
             let fade = exp(-100 * t) * min(1, t / 0.001)
-            let value = (sin(2 * .pi * 1700 * t) * 0.55 + sin(2 * .pi * 3100 * t) * 0.2) * fade
+            let value = (sin(2 * .pi * (hit ? 2400 : 1700) * t) * 0.55 + sin(2 * .pi * (hit ? 4200 : 3100) * t) * 0.2) * fade
             put(Int16(max(-32767, min(32767, value * 32767))))
         }
         return data
