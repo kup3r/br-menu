@@ -350,7 +350,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         switch action {
         case "collapse":
             _ = gameActionProvider?("flightRelease", [:])
-            let changes = { self.host.collapsed.toggle(); self.host.applyCollapse(); self.placeWindow() }
+            let changes = { self.host.collapsed.toggle(); self.host.applyCollapse(); self.placeWindow(); self.configureControls() }
             if MenuPreferences.shared.animations && !UIAccessibility.isReduceMotionEnabled {
                 UIView.transition(with: host.view, duration: 0.22, options: [.transitionCrossDissolve, .allowUserInteraction], animations: changes)
             } else { changes() }
@@ -426,6 +426,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     }
     private func configureControls() {
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
+        values["triggerBot"] = MenuPreferences.shared.flag("triggerBot") && host.collapsed ? 1 : 0
         values["triggerAimOnly"] = MenuPreferences.shared.flag("triggerAimOnly", fallback: true) ? 1 : 0
         values["triggerRadius"] = MenuPreferences.shared.triggerRadius
         values["triggerDelay"] = MenuPreferences.shared.triggerDelay
