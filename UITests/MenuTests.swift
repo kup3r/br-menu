@@ -10,6 +10,11 @@ final class MenuTests: XCTestCase {
         XCTAssertTrue(background.isHittable)
         background.tap()
         XCTAssertTrue(app.staticTexts["demo.backgroundCount"].label.contains("Нажми фон: 1"))
+        background.tap(withNumberOfTaps: 2, numberOfTouches: 3)
+        let gestureBubble = app.buttons["diagnostics.expand"]
+        XCTAssertTrue(gestureBubble.waitForExistence(timeout: 5), "Three-finger double tap should collapse")
+        gestureBubble.tap()
+        XCTAssertTrue(collapse.waitForExistence(timeout: 5))
         collapse.tap()
         let expand = app.buttons["diagnostics.expand"]
         XCTAssertTrue(expand.waitForExistence(timeout: 5))
@@ -33,6 +38,7 @@ final class MenuTests: XCTestCase {
         open(5)
         XCTAssertTrue(app.switches["diagnostics.noSpread"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.switches["diagnostics.rapidFire"].exists)
+        XCTAssertTrue(app.buttons["diagnostics.shotPreview"].exists)
         open(4)
         XCTAssertTrue(app.buttons["diagnostics.suicide"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["diagnostics.respawn"].exists)

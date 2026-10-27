@@ -64,6 +64,7 @@ public final class BRMenuEntry: NSObject {
         #endif
         let menu = DiagnosticMenu()
         menu.playerProvider = { walls, distance in BRPlayerSnapshot.snapshot(ignoringRenderFlags: walls, maxDistance: distance) }
+        menu.shotEventProvider = { BRPlayerSnapshot.ownShotCount() }
         menu.playerStatusProvider = { BRPlayerSnapshot.status() }
         menu.projectionProvider = { BRPlayerSnapshot.projectionMatrix().map { $0.doubleValue } }
         menu.aspectConfigurationProvider = { BRPlayerSnapshot.configureAspect($0) }

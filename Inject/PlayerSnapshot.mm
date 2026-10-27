@@ -379,6 +379,7 @@ double aimReceived=0;AimActor aimChosen{};bool aimHasChosen=false;
 uint16_t aimOwnID=UINT16_MAX;float aimRange=0;V3 aimOwnPosition{};
 std::atomic<bool> aimEnabled{false};
 std::atomic<uint64_t> aimCallbacks{0},aimRedirects{0},aimSkipped{0};
+std::atomic<uint64_t> ownShotEvents{0};
 bool aimBridgeReady(uint64_t base) {
     // Check the immutable bridge, trampoline and symbol name together.
     std::array<uint32_t,6> manifest{};std::array<uint8_t,20> trampoline{};
@@ -615,6 +616,13 @@ extern "C" __attribute__((used,visibility("default")))
 uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *to,AimQueue original) noexcept {
     if(!original)return 0;
     aimCallbacks.fetch_add(1,std::memory_order_relaxed);
+    // A queue callback is a local shot event, not confirmation of damage/hit.
+    @autoreleasepool {
+        Local local;float hp=0;
+        if(getLocal(local)&&reinterpret_cast<uint64_t>(owner)==local.ped&&
+           !local.vehicle&&read(local.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0)
+            ownShotEvents.fetch_add(1,std::memory_order_relaxed);
+    }
     V3 output{};bool redirect=false;
     if(aimEnabled.load(std::memory_order_relaxed)) {
         @autoreleasepool {
@@ -670,6 +678,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
 }
 
 @implementation BRPlayerSnapshot
++ (uint64_t)ownShotCount { return ownShotEvents.load(std::memory_order_relaxed); }
 + (void)configureAspect:(double)scale {
     projectionScale.store(std::isfinite(scale)?float(std::clamp(scale,1.0,1.6)):1,std::memory_order_relaxed);
 }

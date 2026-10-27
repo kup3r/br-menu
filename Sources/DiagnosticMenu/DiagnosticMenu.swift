@@ -2,10 +2,12 @@ import UIKit
 import Darwin
 import GLKit
 import QuartzCore
+import AVFoundation
+import UniformTypeIdentifiers
 
 /// Local diagnostics for an app you control. Install on the main actor.
 @MainActor
-public final class DiagnosticMenu: NSObject {
+public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
     private weak var scene: UIWindowScene?
     private weak var appWindow: UIWindow?
     private var window: UIWindow?
@@ -39,6 +41,9 @@ public final class DiagnosticMenu: NSObject {
 
     private var coordinateText = "Позиция: источник не найден"
     private var gestures: [UITapGestureRecognizer] = []
+    public var shotEventProvider: (() -> UInt64)?
+    private var lastShotEvent: UInt64?
+    private let shotAudio = ReactShotAudio()
     private var dragOrigin: CGPoint?
     private var timer: Timer?
     private var link: CADisplayLink?
@@ -57,6 +62,7 @@ public final class DiagnosticMenu: NSObject {
         appWindow = scene.windows.first(where: { $0.isKeyWindow })
             ?? scene.windows.first(where: { $0.windowLevel == .normal })
         UIDevice.current.isBatteryMonitoringEnabled = true
+        lastShotEvent = shotEventProvider?()
         let overlay = PassthroughWindow(windowScene: scene)
         overlay.windowLevel = .alert + 1
         overlay.backgroundColor = .clear
@@ -79,17 +85,7 @@ public final class DiagnosticMenu: NSObject {
             self.dragOrigin = CGPoint(x: origin.x + delta.x, y: origin.y + delta.y)
             self.placeWindow()
         }
-        for targetWindow in ([appWindow, overlay] as [UIWindow?]) {
-            guard let targetWindow else { continue }
-            let gesture = UITapGestureRecognizer(target: self, action: #selector(toggleMenu))
-            gesture.numberOfTouchesRequired = 3
-            gesture.numberOfTapsRequired = 2
-            gesture.cancelsTouchesInView = false
-            gesture.delaysTouchesBegan = false
-            gesture.delaysTouchesEnded = false
-            targetWindow.addGestureRecognizer(gesture)
-            gestures.append(gesture)
-        }
+        refreshGestureWindows()
         host.loadViewIfNeeded()
         placeWindow()
         overlay.isHidden = false // Does not take keyboard focus from the host app.
@@ -108,6 +104,7 @@ public final class DiagnosticMenu: NSObject {
     /// Call when disconnecting the scene; releases CADisplayLink's target reference.
     public func uninstall() {
         controlStopProvider?()
+        shotAudio.stop(); lastShotEvent = nil
         restoreStretch()
         espGeneration += 1
         timer?.invalidate(); timer = nil
@@ -135,14 +132,45 @@ public final class DiagnosticMenu: NSObject {
         host.refreshLog()
     }
 
+
+    /// Rebind after the launcher/game replaces its normal UIWindow.
+    private func refreshGestureWindows() {
+        guard let scene else { return }
+        let candidates = scene.windows.filter { !$0.isHidden && ($0.windowLevel == .normal || $0 === window) }
+        gestures.removeAll { recognizer in
+            guard let attached = recognizer.view as? UIWindow,
+                  candidates.contains(where: { $0 === attached }) else {
+                recognizer.view?.removeGestureRecognizer(recognizer); return true
+            }
+            return false
+        }
+        if let active = candidates.first(where: { $0.isKeyWindow && $0 !== window })
+            ?? candidates.first(where: { $0.windowLevel == .normal }) { appWindow = active }
+        for target in candidates where !gestures.contains(where: { $0.view === target }) {
+            let gesture = UITapGestureRecognizer(target: self, action: #selector(toggleMenu))
+            gesture.numberOfTouchesRequired = 3; gesture.numberOfTapsRequired = 2
+            gesture.delegate = self; gesture.cancelsTouchesInView = false
+            gesture.delaysTouchesBegan = false; gesture.delaysTouchesEnded = false
+            gesture.requiresExclusiveTouchType = false
+            target.addGestureRecognizer(gesture); gestures.append(gesture)
+        }
+    }
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                                  shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
     @objc private func toggleMenu() { perform("collapse") }
-    @objc private func background() { restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
+    @objc private func background() { shotAudio.stop(); lastShotEvent = nil; restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
     @objc private func foreground() {
         sampledController = nil; sampledTime = 0; gameRate = nil
         frames = 0; previousTimestamp = 0; sampleStart = 0; refreshRate = 0; controlTimestamp = 0
         configureControls(); link?.isPaused = false; placeWindow(); append("Возврат в приложение")
     }
     @objc private func tick(_ display: CADisplayLink) {
+        if scene?.activationState == .foregroundActive, let count = shotEventProvider?() {
+            if let previous = lastShotEvent, count > previous, MenuPreferences.shared.flag("customShotSound") {
+                shotAudio.play()
+            }
+            lastShotEvent = count
+        }
         if scene?.activationState == .foregroundActive, MenuPreferences.shared.needsPlayers {
             refreshPlayers()
             let matrix = projectionProvider?() ?? []
@@ -194,6 +222,7 @@ public final class DiagnosticMenu: NSObject {
         host.view.setNeedsLayout()
     }
     private func updateMetrics() {
+        refreshGestureWindows()
         placeWindow()
         sampleGameRate()
         applyStretch()
@@ -384,6 +413,14 @@ public final class DiagnosticMenu: NSObject {
         case "flipVehicle": runGame("flipVehicle", [:])
         case "massPed", "massVehicle": runGame(action, ["factor": MenuPreferences.shared.massFactor])
         case "massReset": runGame("massReset", [:])
+        case "aspectOriginal": MenuPreferences.shared.stretch = 1; host.setStretch(1); configureControls(); updateMetrics()
+        case "aspectTablet": MenuPreferences.shared.stretch = 1.5; host.setStretch(1.5); configureControls(); updateMetrics()
+        case "aspectWide": MenuPreferences.shared.stretch = 1.6; host.setStretch(1.6); configureControls(); updateMetrics()
+        case "shotPreview": shotAudio.play()
+        case "shotImport": importShotSound()
+        case "shotReset": shotAudio.reset(); host.actionStatus.text = "Выбран мягкий щелчок"
+        case "commandCompose": composeCommand()
+        case "commandAliases": editCommandAliases()
         case "clear": host.messages.removeAll(); host.refreshLog()
         default: break
         }
@@ -402,6 +439,44 @@ public final class DiagnosticMenu: NSObject {
         host.actionStatus.text = result
         append(result)
         updateMetrics()
+    }
+
+    private func importShotSound() {
+        guard host.presentedViewController == nil else { return }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.audio], asCopy: true)
+        picker.delegate = self; picker.allowsMultipleSelection = false
+        window?.makeKey(); host.present(picker, animated: true)
+    }
+    public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        defer { appWindow?.makeKey() }
+        guard let url = urls.first else { return }
+        do { try shotAudio.importFile(url); host.actionStatus.text = "Звук выстрела сохранён" }
+        catch { host.actionStatus.text = "Нужен аудиофайл до 1 МиБ и длительностью до 2 секунд" }
+    }
+    public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { appWindow?.makeKey() }
+    private func composeCommand() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Быстрая команда", message: "Введи /cf и аргументы. Развёрнутая команда будет скопирована — вставь её в чат игры.", preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "/cf 17"; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: "Скопировать", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }; self.appWindow?.makeKey()
+            let command = ReactCommandAliases.expand(alert?.textFields?.first?.text ?? "", rules: MenuPreferences.shared.commandAliases)
+            guard !command.isEmpty else { return }
+            UIPasteboard.general.string = command; self.host.actionStatus.text = "Скопировано: " + command
+        })
+        window?.makeKey(); host.present(alert, animated: true)
+    }
+    private func editCommandAliases() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Сокращения команд", message: "Формат: /cf=/cuff; /короткая=/полная. Применяется в кнопке «Быстрая команда».", preferredStyle: .alert)
+        alert.addTextField { $0.text = MenuPreferences.shared.commandAliases; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak alert] _ in
+            self?.appWindow?.makeKey()
+            MenuPreferences.shared.commandAliases = String((alert?.textFields?.first?.text ?? "").prefix(2048))
+        })
+        window?.makeKey(); host.present(alert, animated: true)
     }
     private func requestAimWhitelist() {
         guard host.presentedViewController == nil else { return }
@@ -501,6 +576,10 @@ private final class MenuPreferences {
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
+    var commandAliases: String {
+        get { defaults.string(forKey: "commandAliases") ?? "/cf=/cuff" }
+        set { defaults.set(newValue, forKey: "commandAliases") }
+    }
     var opacity: CGFloat {
         get { defaults.object(forKey: "opacity") == nil ? 0.96 : max(0.45, min(1, CGFloat(defaults.double(forKey: "opacity")))) }
         set { defaults.set(Double(newValue), forKey: "opacity") }
@@ -806,6 +885,7 @@ private final class MenuController: UIViewController {
     private let stretchSlider = UISlider()
     private let stretchLabel = UILabel()
     let stretchStatus = UILabel()
+    func setStretch(_ value: Double) { stretchSlider.value = Float(value); stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", value) }
     func resetStretch() { stretchSlider.value = 1; stretchLabel.text = "Масштаб 3D-проекции: ×1.00"; stretchStatus.text = "Растяг выключен" }
     var showBubble = MenuPreferences.shared.flag("bubble", fallback: true)
     var onAction: ((String) -> Void)?, onMove: (() -> Void)?, onDrag: ((CGPoint) -> Void)?, onChange: (() -> Void)?
@@ -1003,6 +1083,11 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
+        pages[5].addArrangedSubview(toggle("Доп. звук выстрела", key: "customShotSound")
+        pages[5].addArrangedSubview(note("Воспроизводится поверх звука игры")))
+        pages[5].addArrangedSubview(button("Прослушать звук", "shotPreview"))
+        pages[5].addArrangedSubview(button("Импортировать звук", "shotImport"))
+        pages[5].addArrangedSubview(button("Мягкий щелчок", "shotReset"))
         pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
         pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
         pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
@@ -1047,10 +1132,17 @@ private final class MenuController: UIViewController {
             self.stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", MenuPreferences.shared.stretch)
             self.onChange?()
         }, for: .valueChanged)
+        let aspectPresets = UIStackView(); aspectPresets.spacing = 6; aspectPresets.distribution = .fillEqually
+        aspectPresets.addArrangedSubview(button("Обычный", "aspectOriginal"))
+        aspectPresets.addArrangedSubview(button("Планшет", "aspectTablet"))
+        aspectPresets.addArrangedSubview(button("Широкий", "aspectWide"))
+        pages[7].addArrangedSubview(aspectPresets)
         pages[7].addArrangedSubview(stretchLabel); pages[7].addArrangedSubview(stretchSlider)
         stretchStatus.font = .systemFont(ofSize: 10); stretchStatus.textColor = .systemOrange; stretchStatus.numberOfLines = 0
         pages[7].addArrangedSubview(stretchStatus)
         pages[7].addArrangedSubview(button("Вернуть обычное изображение", "stretchReset"))
+        pages[7].addArrangedSubview(button("Быстрая команда", "commandCompose"))
+        pages[7].addArrangedSubview(button("Сокращения команд", "commandAliases"))
         pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
         pages[7].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
         pages[7].addArrangedSubview(toggle("Плавающая кнопка", key: "bubble", fallback: true))
@@ -1160,3 +1252,59 @@ private final class PassthroughWindow: UIWindow {
     }
 }
 
+
+
+/// Additional local feedback. Does not replace or mute the game's audio session.
+@MainActor
+private final class ReactShotAudio {
+    private var players: [AVAudioPlayer] = []
+    private var cached: Data?
+    private var root: URL {
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory).appendingPathComponent("ReactModifications", isDirectory: true)
+    }
+    private var file: URL { root.appendingPathComponent("shot.audio") }
+    private enum ImportError: Error { case invalid }
+    func importFile(_ url: URL) throws {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values.isRegularFile == true, let size = values.fileSize, size > 0, size <= 1_048_576 else { throw ImportError.invalid }
+        let data = try Data(contentsOf: url)
+        guard data.count <= 1_048_576 else { throw ImportError.invalid }
+        let check = try AVAudioPlayer(data: data)
+        guard check.duration.isFinite, check.duration > 0, check.duration <= 2, check.numberOfChannels <= 2 else { throw ImportError.invalid }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try data.write(to: file, options: .atomic)
+        stop(); cached = data
+    }
+    func reset() { stop(); try? FileManager.default.removeItem(at: file); cached = Self.click() }
+    func stop() { players.forEach { $0.stop() }; players.removeAll() }
+    func play() {
+        if cached == nil { cached = (try? Data(contentsOf: file)) ?? Self.click() }
+        guard let data = cached, let player = try? AVAudioPlayer(data: data) else { return }
+        players.removeAll { !$0.isPlaying }
+        if players.count >= 4 { players.removeFirst().stop() }
+        player.volume = 0.35
+        players.append(player); player.play()
+    }
+    private static func click() -> Data {
+        let sampleRate = 22_050, count = 1_323
+        var data = Data()
+        func ascii(_ text: String) { data.append(contentsOf: text.utf8) }
+        func put<T: FixedWidthInteger>(_ value: T) {
+            var little = value.littleEndian
+            withUnsafeBytes(of: &little) { data.append(contentsOf: $0) }
+        }
+        ascii("RIFF"); put(UInt32(36 + count * 2)); ascii("WAVEfmt ")
+        put(UInt32(16)); put(UInt16(1)); put(UInt16(1)); put(UInt32(sampleRate))
+        put(UInt32(sampleRate * 2)); put(UInt16(2)); put(UInt16(16)); ascii("data"); put(UInt32(count * 2))
+        for index in 0..<count {
+            let t = Double(index) / Double(sampleRate)
+            let fade = exp(-100 * t) * min(1, t / 0.001)
+            let value = (sin(2 * .pi * 1700 * t) * 0.55 + sin(2 * .pi * 3100 * t) * 0.2) * fade
+            put(Int16(max(-32767, min(32767, value * 32767))))
+        }
+        return data
+    }
+}

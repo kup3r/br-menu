@@ -6,6 +6,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, id> *)aspectState;
 + (void)configureAim:(NSDictionary<NSString *, id> *)settings NS_SWIFT_NAME(configureAim(_:));
 + (NSDictionary<NSString *, id> *)aimFrame:(double)width height:(double)height stretch:(double)stretch NS_SWIFT_NAME(aimFrame(width:height:stretch:));
++ (uint64_t)ownShotCount;
 + (NSString *)status;
 + (NSArray<NSNumber *> *)projectionMatrix;
 + (void)tickControls:(double)elapsed;

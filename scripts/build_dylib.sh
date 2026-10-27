@@ -17,8 +17,8 @@ xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "$sdk_path" \
   -c Inject/PlayerSnapshot.mm -o build/inject/PlayerSnapshot.o
 xcrun --sdk iphoneos swiftc -swift-version 5 -O -emit-library \
   -module-name BRMenuInject -import-objc-header Inject/PlayerSnapshot.h -target arm64-apple-ios18.0 -sdk "$sdk_path" \
-  Sources/DiagnosticMenu/DiagnosticMenu.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
-  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework GLKit -framework QuartzCore -framework Security \
+  Sources/DiagnosticMenu/DiagnosticMenu.swift Sources/DiagnosticMenu/ReactCommands.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
+  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework GLKit -framework QuartzCore -framework Security -framework AVFoundation -framework UniformTypeIdentifiers \
   -Xlinker -u -Xlinker _BRMenuQueueHook15 -Xlinker -u -Xlinker _BRMenuAspectHook17 \
   -Xlinker -install_name -Xlinker '@rpath/BRMenuInject.dylib' \
   -o dist/BRMenuInject.dylib
