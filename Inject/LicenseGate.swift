@@ -37,7 +37,7 @@ final class LicenseGate {
         keyField.isSecureTextEntry = true; keyField.text = secret("key")
         keyField.accessibilityIdentifier = "license.key"
         status.numberOfLines = 0; status.font = .systemFont(ofSize: 14); status.textColor = .secondaryLabel
-        status.text = "Введи ключ из Telegram-бота. Для проверки нужен интернет."
+        status.text = "Введи ключ из Telegram-бота. Для проверки нужен интернет. Первый запуск сервера может занять около минуты."
         var config = UIButton.Configuration.filled(); config.title = "Активировать"; activateButton.configuration = config
         activateButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
         activateButton.addAction(UIAction { [weak self] _ in self?.activate() }, for: .touchUpInside)
@@ -89,7 +89,7 @@ final class LicenseGate {
         guard let url = URL(string: BRLicenseConfiguration.apiURL + path), url.scheme == "https" else {
             throw Failure(message: "Не настроен адрес сервера лицензий")
         }
-        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 15
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let bearer { request.setValue("Bearer " + bearer, forHTTPHeaderField: "Authorization") }
         request.httpBody = try JSONSerialization.data(withJSONObject: fields)

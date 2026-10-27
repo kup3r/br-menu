@@ -54,17 +54,18 @@ jobs:
           TEST_DATABASE_URL: postgresql+asyncpg://license_test:test_password_only@localhost:5432/license_test
         run: python -m pytest -q
   licensed-client:
+    needs: backend
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build with iPhone SDK (test endpoints unless manually configured)
+      - name: Build licensed menu for the live key server
         env:
           BRMENU_LICENSED: '1'
-          BRMENU_LICENSE_API_URL: ${{ inputs.license_api_url || 'https://license.example.invalid' }}
-          BRMENU_LICENSE_BOT_URL: ${{ inputs.license_bot_url || 'https://t.me/example' }}
+          BRMENU_LICENSE_API_URL: ${{ inputs.license_api_url || 'https://br-license-bot.onrender.com' }}
+          BRMENU_LICENSE_BOT_URL: ${{ inputs.license_bot_url || 'https://t.me/ReactSellerBot' }}
         run: bash scripts/build_dylib.sh
       - name: Publish configured client only
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.license_api_url != '' && inputs.license_bot_url != '' }}
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
         uses: actions/upload-artifact@v4
         with:
           name: BRMenu-Licensed
