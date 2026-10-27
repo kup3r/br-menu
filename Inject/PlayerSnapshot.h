@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules NS_SWIFT_NAME(configureChatAliases(_:));
 + (NSString *)sendChatCommand:(NSString *)command NS_SWIFT_NAME(sendChatCommand(_:));
 + (uint64_t)ownShotCount;
++ (void)tickVisuals;
++ (BOOL)clearNativeChat;
 + (NSString *)status;
 + (NSArray<NSNumber *> *)projectionMatrix;
 + (void)tickControls:(double)elapsed;

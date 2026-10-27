@@ -395,6 +395,7 @@ double aimReceived=0;AimActor aimChosen{};bool aimHasChosen=false;
 uint16_t aimOwnID=UINT16_MAX;float aimRange=0;V3 aimOwnPosition{};
 std::atomic<bool> regularAimEnabled{false},customShotEnabled{false},customHitEnabled{false},hideLogoEnabled{false},localCommandsEnabled{false};
 std::atomic<double> aimSmoothSeconds{0.2};
+std::atomic<int64_t> displayBalance21{-1};
 std::atomic<bool> regularAimVisible{true};
 std::atomic<bool> aimEnabled{false},triggerEnabled{false},antiFreezeEnabled{false};
 std::atomic<int> lagIntervalMs{0},triggerDelayMs{120},triggerRadius{10};
@@ -927,6 +928,26 @@ void BRMenuChat21(const char *input,Chat21 original) noexcept {
 }
 
 namespace {
+struct DisplayBalanceOwner21 {uint64_t base=0,info=0,ped=0;};
+DisplayBalanceOwner21 balanceOwner21;
+void updateDisplayBalance21() {
+    if(!NSThread.isMainThread)return;
+    const int64_t wanted=displayBalance21.load();const uint64_t base=verifiedProjectionBase.load();
+    if(balanceOwner21.info&&(wanted<0||balanceOwner21.base!=base)) {
+        uint64_t ped=0;int64_t real=0;
+        if(read(balanceOwner21.info,ped)&&ped==balanceOwner21.ped&&read(balanceOwner21.info+0x58,real)&&std::abs(double(real))<=99999999999.0)
+            (void)writeData(balanceOwner21.info+0x60,real);
+        balanceOwner21={};
+    }
+    if(wanted<0||!base||!anchorAt(base,0xf88f8,0xf9003269U))return;
+    uint16_t index=0;uint64_t ped=0,pool=0,local=0,own=0;int64_t real=0;
+    if(!read(base+0x31f17e8,index)||index>=1504||!read(base+0x340de18,pool)||!pool||!read(pool,local)||!local||!read(local+0x38,own)||!own)return;
+    const uint64_t info=base+0x31f17f0+uint64_t(index)*0xf8;
+    if(!read(info,ped)||ped!=own||!read(info+0x58,real)||std::abs(double(real))>99999999999.0)return;
+    // +58 is server-fed money; +60 is only its animated presentation counter (f88c0..f88f8).
+    // Actual money, transactions and RPC payloads remain untouched.
+    balanceOwner21={base,info,ped};(void)writeData(info+0x60,wanted);
+}
 void moveCamera21(const AimActor &target,double now) {
     static double last=0;const double dt=last>0?std::clamp(now-last,0.001,0.05):1.0/60;last=now;
     if(!regularAimEnabled.load())return;
@@ -957,6 +978,15 @@ void moveCamera21(const AimActor &target,double now) {
 }
 
 @implementation BRPlayerSnapshot
++ (BOOL)clearNativeChat {
+    if(!NSThread.isMainThread)return NO;
+    const uint64_t base=imageBase();if(!base||!extensionBridgeReady(base)||
+       !anchorAt(base,0x57fe50,0xa9bf7bfdU)||!anchorAt(base,0x9efd4c,0xa9bb67faU)||!anchorAt(base,0x95f470,0xa9be4ff4U))return NO;
+    using Version=bool(*)();using Clear=void(*)();
+    // Exactly the two local renderers selected by the game's own clear-chat RPC at 95c510.
+    const bool classic=reinterpret_cast<Version>(base+0x57fe50)();
+    reinterpret_cast<Clear>(base+(classic?0x9efd4c:0x95f470))();return YES;
+}
 + (BOOL)clearChatForController:(NSObject *)controller {
     if(!NSThread.isMainThread||!controller)return NO;
     const uint64_t base=mainBase21();if(!base)return NO;
@@ -976,6 +1006,7 @@ void moveCamera21(const AimActor &target,double now) {
     if(!writeData(object+offset,empty)){release(reinterpret_cast<void *>(empty));return NO;}
     release(reinterpret_cast<void *>(old));return YES;
 }
++ (void)tickVisuals {updateDisplayBalance21();}
 + (NSString *)extensionStatus {return extensionBridgeReady(imageBase())?@"Дополнительные настройки подключены":@"Нужен обновлённый IPA";}
 + (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules {
     std::unordered_map<std::string,std::string> next;
@@ -1070,7 +1101,7 @@ void moveCamera21(const AimActor &target,double now) {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};runTrack={};regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        const Flight old=flight;flight={};assists={};runTrack={};displayBalance21.store(-1);updateDisplayBalance21();regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -1092,6 +1123,9 @@ void moveCamera21(const AimActor &target,double now) {
         customHitEnabled.store(extended&&settings[@"customHitSound"].boolValue);
         hideLogoEnabled.store(extended&&settings[@"hideServerLogo"].boolValue);
         localCommandsEnabled.store(extended);
+        const double balance=settings[@"visualBalanceValue"].doubleValue;
+        displayBalance21.store(extended&&settings[@"visualBalanceOverride"].boolValue&&std::isfinite(balance)?int64_t(std::clamp(balance,0.0,99999999999.0)):-1);
+        updateDisplayBalance21();
 
         triggerEnabled.store(extended&&settings[@"triggerBot"].boolValue);
         triggerRadius.store(std::clamp(settings[@"triggerRadius"].intValue,2,30));

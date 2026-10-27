@@ -22,6 +22,8 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public var projectionProvider: (() -> [Double])?
     public var aspectConfigurationProvider: ((Double) -> Void)?
     public var aspectStateProvider: (() -> [String: Any])?
+    public var clearNativeChatProvider: (() -> Bool)?
+    public var visualTickProvider: (() -> Void)?
     public var clearChatControllerProvider: ((NSObject) -> Bool)?
     public var aimFrameProvider: ((Double, Double, Double) -> [String: Any])?
     public var aimConfigurationProvider: ((Bool, Double, Double, Bool, String) -> Void)?
@@ -172,8 +174,9 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     @objc private func replacementHit() { if MenuPreferences.shared.flag("customHitSound"), scene?.activationState == .foregroundActive { hitAudio.play() } }
     @objc private func clearLocalChat() {
         guard let scene else { return }
+        let nativeCleared = clearNativeChatProvider?() ?? false
         let count = hostUI.clearChat(in: scene, clear: clearChatControllerProvider)
-        host.actionStatus.text = count > 0 ? "Чат очищен" : "Окно игрового чата ещё не найдено"
+        host.actionStatus.text = nativeCleared || count > 0 ? "Чат очищен" : "Окно игрового чата ещё не найдено"
     }
     @objc private func background() { shotAudio.stop(); hitAudio.stop(); hostUI.restore(); lastShotEvent = nil; restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
     @objc private func foreground() {
@@ -183,6 +186,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     }
     @objc private func tick(_ display: CADisplayLink) {
         if let scene, scene.activationState == .foregroundActive {
+            visualTickProvider?()
             hostUI.update(in: scene, balance: MenuPreferences.shared.flag("visualBalance") ? MenuPreferences.shared.visualBalance : nil)
         }
         if scene?.activationState == .foregroundActive, MenuPreferences.shared.needsPlayers {
@@ -444,6 +448,8 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
         values["regularAim"] = MenuPreferences.shared.flag("regularAim") && host.collapsed ? 1 : 0
         values["regularAimVisible"] = MenuPreferences.shared.flag("regularAimVisible", fallback: true) ? 1 : 0
+        values["visualBalanceOverride"] = MenuPreferences.shared.flag("visualBalance") ? 1 : 0
+        values["visualBalanceValue"] = MenuPreferences.shared.visualBalance
         values["aimSmooth"] = MenuPreferences.shared.aimSmooth
         host.applyTheme()
         values["triggerBot"] = MenuPreferences.shared.flag("triggerBot") && host.collapsed ? 1 : 0
@@ -550,7 +556,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
         alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
             guard let self else { return }; self.appWindow?.makeKey()
-            guard let text = alert?.textFields?.first?.text, let value = Double(text), value.isFinite, value >= 0, value <= 999_999_999_999, value.rounded() == value else { self.host.actionStatus.text = "Введи целую сумму от 0 до 999999999999"; return }
+            guard let text = alert?.textFields?.first?.text, let value = Double(text), value.isFinite, value >= 0, value <= 99_999_999_999, value.rounded() == value else { self.host.actionStatus.text = "Введи целую сумму от 0 до 99999999999"; return }
             MenuPreferences.shared.visualBalance = value; MenuPreferences.shared.set("visualBalance", true)
             self.host.actionStatus.text = "Визуальный баланс изменён"; self.configureControls()
         })
@@ -638,7 +644,7 @@ private final class MenuPreferences {
         set { defaults.set(newValue, forKey: "aimSmooth") }
     }
     var visualBalance: Double {
-        get { defaults.object(forKey: "visualBalanceValue") == nil ? 1_000_000 : max(0, min(999_999_999_999, defaults.double(forKey: "visualBalanceValue"))) }
+        get { defaults.object(forKey: "visualBalanceValue") == nil ? 1_000_000 : max(0, min(99_999_999_999, defaults.double(forKey: "visualBalanceValue"))) }
         set { defaults.set(newValue, forKey: "visualBalanceValue") }
     }
     var runMultiplier: Double {
