@@ -31,7 +31,7 @@ final class LicenseGate {
         controller.overrideUserInterfaceStyle = .dark
         let stack = UIStackView(); stack.axis = .vertical; stack.spacing = 16
         stack.translatesAutoresizingMaskIntoConstraints = false; controller.view.addSubview(stack)
-        let title = UILabel(); title.text = "BR · Активация"; title.font = .boldSystemFont(ofSize: 27); title.textColor = .white
+        let title = UILabel(); title.text = "React Modifications"; title.font = .boldSystemFont(ofSize: 23); title.adjustsFontSizeToFitWidth = true; title.minimumScaleFactor = 0.75; title.textColor = .white
         keyField.placeholder = "Ключ BR-…"; keyField.borderStyle = .roundedRect
         keyField.autocorrectionType = .no; keyField.spellCheckingType = .no; keyField.autocapitalizationType = .allCharacters
         keyField.isSecureTextEntry = true; keyField.text = secret("key")
@@ -162,3 +162,4 @@ private extension NSLayoutConstraint {
     func withPriority(_ priority: UILayoutPriority) -> NSLayoutConstraint { self.priority = priority; return self }
 }
 #endif
+

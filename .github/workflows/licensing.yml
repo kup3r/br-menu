@@ -4,6 +4,7 @@ on:
     paths:
       - 'licensing/**'
       - 'Inject/LicenseGate.swift'
+      - 'Sources/DiagnosticMenu/**'
       - 'Inject/BRMenuEntry.swift'
       - 'scripts/build_dylib.sh'
       - 'scripts/license_config.py'
@@ -11,11 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       license_api_url:
-        description: 'Public HTTPS license server URL (empty = compile check only)'
+        description: 'Public HTTPS license server URL (empty = live React server)'
         required: false
         type: string
       license_bot_url:
-        description: 'https://t.me/YOUR_BOT (empty = compile check only)'
+        description: 'Telegram bot URL (empty = ReactSellerBot)'
         required: false
         type: string
 permissions:
@@ -73,3 +74,4 @@ jobs:
             dist/BRMenuInject.dylib
             dist/BRMenuInject-SHA256.txt
           retention-days: 7
+

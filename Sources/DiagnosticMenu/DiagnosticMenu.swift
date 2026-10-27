@@ -101,7 +101,7 @@ public final class DiagnosticMenu: NSObject {
         }
         NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIScene.didEnterBackgroundNotification, object: scene)
         NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIScene.didActivateNotification, object: scene)
-        append("Меню v17 подключено")
+        append("React Modifications подключено")
         configureControls(); updateMetrics()
     }
 
@@ -204,7 +204,7 @@ public final class DiagnosticMenu: NSObject {
             let skipped = (lastAimState["skipped"] as? NSNumber)?.uint64Value ?? 0
             let candidates = (lastAimState["candidates"] as? NSNumber)?.intValue ?? 0
             let range = (lastAimState["range"] as? NSNumber)?.doubleValue ?? 0
-            host.aimStatus.text = "\(status)\nВызовы: \(callbacks) · перенаправлено: \(redirects) · пропущено: \(skipped)\nИгроков: \(candidates) · дальность оружия: \(Int(range))"
+            host.aimStatus.text = "Целей: \(candidates)"
         } else { host.aimStatus.text = "Silent Aim выключен" }
         if let position = coordinateProvider?() { setLocalCoordinates(x: position.x, y: position.y, z: position.z) }
         else if let state = localStateProvider?(), let x = state["x"] as? NSNumber,
@@ -305,7 +305,7 @@ public final class DiagnosticMenu: NSObject {
         aspectConfigurationProvider?(factor)
         let state = aspectStateProvider?() ?? [:]
         if factor <= 1.001 { host.stretchStatus.text = "Обычная 3D-проекция" }
-        else if (state["ready"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Для изменения проекции нужна IPA v17; интерфейс не масштабируется" }
+        else if (state["ready"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Настройка изображения недоступна" }
         else if (state["observed"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Ожидание первого кадра 3D-проекции" }
         else { host.stretchStatus.text = String(format: "3D-проекция: ×%.2f · игровой интерфейс в границах экрана", factor) }
     }
@@ -824,7 +824,7 @@ private final class MenuController: UIViewController {
             layout.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), layout.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14)
         ])
         let header = UIStackView(); header.spacing = 8
-        let title = UILabel(); title.text = "BR  /  STUDIO"; title.textColor = .white; title.font = .boldSystemFont(ofSize: 18)
+        let title = UILabel(); title.text = "React Modifications"; title.textColor = .white; title.font = .boldSystemFont(ofSize: 18); title.adjustsFontSizeToFitWidth = true; title.minimumScaleFactor = 0.7
         title.isUserInteractionEnabled = true
         title.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
         header.addArrangedSubview(title)
@@ -838,7 +838,7 @@ private final class MenuController: UIViewController {
         navigation.addArrangedSubview(home); navigation.addArrangedSubview(pageTitle)
         layout.addArrangedSubview(navigation)
         actionStatus.numberOfLines = 2; actionStatus.font = .systemFont(ofSize: 12)
-        actionStatus.textColor = .systemOrange; actionStatus.text = "v18 · выбери раздел"
+        actionStatus.textColor = .systemOrange; actionStatus.text = ""
         actionStatus.accessibilityIdentifier = "diagnostics.actionStatus"
         layout.addArrangedSubview(actionStatus)
         scroll.alwaysBounceVertical = true
@@ -878,20 +878,19 @@ private final class MenuController: UIViewController {
         pages[0].addArrangedSubview(coordinates)
         espStatus.numberOfLines = 0; espStatus.font = .systemFont(ofSize: 11); espStatus.textColor = .systemOrange
         pages[0].addArrangedSubview(espStatus)
-        pages[0].addArrangedSubview(note("FPS GLK — прирост framesDisplayed активного GLKViewController. Это кадровые обновления, не замер GPU. UI Гц — отдельный счётчик."))
         let actions = UIStackView(); actions.spacing = 8; actions.distribution = .fillEqually
         actions.addArrangedSubview(button("Сторона", "side")); actions.addArrangedSubview(button("Копия", "copy")); pages[0].addArrangedSubview(actions)
         log.isEditable = false; log.font = .monospacedSystemFont(ofSize: 10, weight: .regular); log.textColor = .secondaryLabel
         log.backgroundColor = UIColor.white.withAlphaComponent(0.04); log.layer.cornerRadius = 10
         log.heightAnchor.constraint(equalToConstant: 75).isActive = true
         pages[0].addArrangedSubview(log); pages[0].addArrangedSubview(button("Очистить журнал", "clear"))
-        pages[1].addArrangedSubview(toggle("ESP · эксперимент", key: "esp"))
+        pages[1].addArrangedSubview(toggle("ESP", key: "esp"))
         pages[1].addArrangedSubview(note("Данные игроков: 10–30 Гц. Проекция боксов — каждый кадр экрана."))
         let rate = UISlider(); rate.minimumValue = 10; rate.maximumValue = 30; rate.value = Float(MenuPreferences.shared.espRate)
         rate.accessibilityLabel = "Частота данных ESP"
         rate.addAction(UIAction { [weak rate] _ in MenuPreferences.shared.espRate = Double(rate?.value ?? 20) }, for: .valueChanged)
         pages[1].addArrangedSubview(rate)
-        pages[1].addArrangedSubview(toggle("За стенами · без фильтра отрисовки", key: "espWalls", fallback: true))
+        pages[1].addArrangedSubview(toggle("За стенами", key: "espWalls", fallback: true))
         pages[1].addArrangedSubview(toggle("Боксы", key: "espBox", fallback: true))
         pages[1].addArrangedSubview(toggle("Ник и ID", key: "espName", fallback: true))
         pages[1].addArrangedSubview(toggle("HP и полоса здоровья", key: "espHP", fallback: true))
@@ -903,7 +902,6 @@ private final class MenuController: UIViewController {
         range.addAction(UIAction { [weak self, weak range] _ in
             MenuPreferences.shared.maxDistance = Double(range?.value ?? 150); self?.onChange?()
         }, for: .valueChanged); pages[1].addArrangedSubview(range)
-        pages[1].addArrangedSubview(note("ESP читает только streamed-игроков этой сборки. Невидимые для клиента сущности недоступны. Дальность считается от камеры."))
         pages[1].addArrangedSubview(toggle("Компактный HUD", key: "hud", fallback: true))
         pages[1].addArrangedSubview(toggle("Прицел в центре экрана", key: "crosshair"))
         pages[1].addArrangedSubview(toggle("Направляющие 3 × 3", key: "grid"))
@@ -913,12 +911,9 @@ private final class MenuController: UIViewController {
         fov.accessibilityLabel = "Радиус FOV"
         fov.addAction(UIAction { [weak self, weak fov] _ in MenuPreferences.shared.fovRadius = Double(fov?.value ?? 100); self?.onChange?() }, for: .valueChanged)
         pages[1].addArrangedSubview(fov)
-        pages[1].addArrangedSubview(note("Общий круг — направляющая. Настройки динамического круга Silent Aim находятся во вкладке Aim."))
-        pages[2].addArrangedSubview(note("Экспериментальные локальные действия · 1.99.0. Результат в игре ещё нужно проверить."))
         flightStatus.text = "AirBrake выключен"; flightStatus.font = .systemFont(ofSize: 11); flightStatus.textColor = .systemOrange
         pages[2].addArrangedSubview(flightStatus)
         pages[2].addArrangedSubview(toggle("No Collision · без столкновений", key: "noCollision"))
-        pages[2].addArrangedSubview(note("Для персонажа пешком. Отключай в свободном месте; сервер может исправить положение."))
         pages[2].addArrangedSubview(toggle("NoClip только в AirBrake", key: "noClip"))
         pages[2].addArrangedSubview(button("AirBrake · включить / выключить", "flightToggle"))
         let flightSpeed = UISlider(); flightSpeed.minimumValue = 1; flightSpeed.maximumValue = 30; flightSpeed.value = Float(MenuPreferences.shared.flightSpeed)
@@ -930,10 +925,8 @@ private final class MenuController: UIViewController {
             for (title, action) in directions { row.addArrangedSubview(holdButton(title, action)) }
             pages[2].addArrangedSubview(row)
         }
-        pages[2].addArrangedSubview(note("NoClip отключает локальный флаг столкновений только в AirBrake. Выключай полёт в свободном месте; сервер может корректировать положение."))
         pages[2].addArrangedSubview(button("Телепорт по метке на карте", "waypoint"))
         pages[2].addArrangedSubview(button("Отменить телепорт по метке", "waypointCancel"))
-        pages[2].addArrangedSubview(note("Поставь метку, закрой карту и нажми телепорт. Только пешком. Для дальней точки ждём загрузки земли до 8 секунд; при неудаче возвращаем назад."))
         pages[2].addArrangedSubview(button("Телепорт по XYZ", "teleportXYZ"))
         pages[2].addArrangedSubview(button("К загруженному игроку по ID", "teleportPlayer"))
         pages[2].addArrangedSubview(button("К транспорту по ID", "teleportVehicle"))
@@ -948,7 +941,6 @@ private final class MenuController: UIViewController {
         pages[2].addArrangedSubview(button("Высокий прыжок", "hop"))
         pages[2].addArrangedSubview(button("Рывок вперёд · та же сила 1–5", "dash"))
         pages[2].addArrangedSubview(toggle("Мягкое падение", key: "slowFall"))
-        pages[2].addArrangedSubview(note("Мягкое падение ограничивает скорость снижения. Иммунитет к урону от падения не гарантируется."))
         pages[2].addArrangedSubview(note("Множитель массы · 0.1–5"))
         let mass = UISlider(); mass.minimumValue = 0.1; mass.maximumValue = 5; mass.value = Float(MenuPreferences.shared.massFactor)
         mass.accessibilityLabel = "Множитель массы"
@@ -961,23 +953,19 @@ private final class MenuController: UIViewController {
         gravity.accessibilityLabel = "Множитель гравитации"
         gravity.addAction(UIAction { [weak gravity] _ in MenuPreferences.shared.gravityFactor = Double(gravity?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(gravity)
-        pages[2].addArrangedSubview(note("1 — исходная, 0 — без притяжения, отрицательная — вверх. Применяется кнопкой."))
         pages[2].addArrangedSubview(button("Применить гравитацию к персонажу", "gravityPed"))
         pages[2].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
-        pages[3].addArrangedSubview(note("Доступно после посадки в транспорт. Серверная синхронизация может изменить результат."))
         carStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); carStatus.textColor = .systemCyan; carStatus.numberOfLines = 0
         pages[3].addArrangedSubview(carStatus)
         pages[3].addArrangedSubview(button("Bypass Lock · открыть ближайшую машину", "unlockVehicle"))
         pages[3].addArrangedSubview(button("Drive Without Key · запустить двигатель", "startEngine"))
-        pages[3].addArrangedSubview(note("Замок — рядом до 8 м. Двигатель — за рулём. Меняется состояние клиента; серверные ключи и права не выдаются."))
         pages[3].addArrangedSubview(button("Подменить модель машины по ID", "carSet"))
         pages[3].addArrangedSubview(button("Вернуть исходную модель машины", "carRestore"))
         pages[3].addArrangedSubview(button("Остановить транспорт", "stopVehicle"))
         pages[3].addArrangedSubview(button("Восстановить HP авто", "healVehicle"))
-        pages[3].addArrangedSubview(button("Ремонт кузова · эксперимент", "repairVehicle"))
-        pages[3].addArrangedSubview(toggle("Блокировать локальный урон авто", key: "vehicleProof"))
+        pages[3].addArrangedSubview(button("Ремонт кузова", "repairVehicle"))
+        pages[3].addArrangedSubview(toggle("Защита транспорта", key: "vehicleProof"))
         pages[3].addArrangedSubview(toggle("Автовосстановление HP авто", key: "autoVehicleHealth"))
-        pages[3].addArrangedSubview(note("Удерживает локальные HP не ниже 1000. Кузов и разрушенное авто эта функция не восстанавливает."))
         pages[3].addArrangedSubview(button("Поставить на колёса", "flipVehicle"))
         pages[3].addArrangedSubview(note("Разовое ускорение · 1–3"))
         let boost = UISlider(); boost.minimumValue = 1; boost.maximumValue = 3; boost.value = Float(MenuPreferences.shared.boostPower)
@@ -989,13 +977,11 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
         pages[3].addArrangedSubview(button("Применить выбранную гравитацию к авто", "gravityVehicle"))
         pages[3].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
-        pages[3].addArrangedSubview(note("Защита действует в локальном обработчике урона; серверное бессмертие не гарантируется. Бесконечное нитро не подключено."))
         selfStatus.numberOfLines = 0; selfStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); selfStatus.textColor = .systemCyan
         pages[4].addArrangedSubview(selfStatus)
         pages[4].addArrangedSubview(button("Suicide · завершить жизнь персонажа", "suicide"))
         pages[4].addArrangedSubview(button("Fast Respawn · появиться снова", "respawn"))
-        pages[4].addArrangedSubview(note("Пешком, после завершения смерти. Используются сохранённые сервером данные появления; сервер может отклонить респаун."))
-        pages[4].addArrangedSubview(toggle("NoAnim · пауза локальной анимации", key: "noAnim"))
+        pages[4].addArrangedSubview(toggle("NoAnim · отключение анимаций", key: "noAnim"))
         pages[4].addArrangedSubview(toggle("Fast Anim · ускоренные анимации", key: "fastAnim"))
         let animationLabel = note(String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate))
         let animationRate = UISlider(); animationRate.minimumValue = 1; animationRate.maximumValue = 4
@@ -1005,40 +991,33 @@ private final class MenuController: UIViewController {
             animationLabel.text = String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate); self?.onChange?()
         }, for: .valueChanged)
         pages[4].addArrangedSubview(animationLabel); pages[4].addArrangedSubview(animationRate)
-        pages[4].addArrangedSubview(note("NoAnim имеет приоритет. Управление воспроизведением, без отмены задач сервера. Синхронизированные анимации могут игнорировать Fast Anim. При выключении исходная скорость восстанавливается."))
         pages[4].addArrangedSubview(button("Сменить скин по ID", "skinSet"))
         pages[4].addArrangedSubview(button("Вернуть исходный скин", "skinRestore"))
         pages[4].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
-        pages[4].addArrangedSubview(toggle("Локальная защита от урона", key: "localProof"))
-        pages[4].addArrangedSubview(toggle("Защита от падения · эксперимент", key: "noFall"))
+        pages[4].addArrangedSubview(toggle("Защита от урона", key: "localProof"))
+        pages[4].addArrangedSubview(toggle("Защита от падения", key: "noFall"))
         pages[4].addArrangedSubview(button("Восстановить HP", "heal"))
         pages[4].addArrangedSubview(button("Восстановить броню", "armor"))
         pages[4].addArrangedSubview(toggle("Автовосстановление HP", key: "autoHealth"))
         pages[4].addArrangedSubview(toggle("Автовосстановление брони", key: "autoArmor"))
-        pages[4].addArrangedSubview(toggle("Выносливость · эксперимент", key: "stamina"))
-        pages[4].addArrangedSubview(note("HP/броня удерживаются не ниже 100. Это локальное восстановление, а не гарантия бессмертия. Выносливость — проверка предполагаемого поля; сравни показания до и во время спринта."))
+        pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
-        pages[5].addArrangedSubview(note("No Recoil пока не подключён: отдельный обработчик отдачи камеры не подтверждён."))
         pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
-        pages[5].addArrangedSubview(note("Убирает случайное отклонение пули. Параметры модели оружия общие внутри клиента; могут затронуть тот же тип у других персонажей локально. При выключении восстанавливаются."))
         pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
-        pages[5].addArrangedSubview(note("Оружие выдаётся локально штатной функцией клиента. Стрельба использует обычное управление игры; серверные права не меняются."))
         pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
         pages[5].addArrangedSubview(button("Заполнить магазин из запаса", "magazineFill"))
         pages[5].addArrangedSubview(toggle("Бесконечный запас патронов", key: "infiniteAmmo"))
-        pages[5].addArrangedSubview(toggle("Без перезарядки · эксперимент", key: "noReload"))
+        pages[5].addArrangedSubview(toggle("Без перезарядки", key: "noReload"))
         pages[5].addArrangedSubview(toggle("Rapid Fire · скорострельность", key: "rapidFire"))
         let rateLabel = note(String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate)); pages[5].addArrangedSubview(rateLabel)
         let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 5; fireRate.value = Float(MenuPreferences.shared.fireRate)
         fireRate.accessibilityLabel = "Множитель скорострельности"
         fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
-        pages[5].addArrangedSubview(note("Только поддерживаемое огнестрельное оружие. Изменяются локальные счётчики и таймер; анимация и сервер могут ограничивать результат. Silent Aim — во вкладке Aim, для него нужна копия IPA v15. Triggerbot не подключён."))
-        pages[6].addArrangedSubview(toggle("Silent Aim · эксперимент", key: "silentAim"))
+        pages[6].addArrangedSubview(toggle("Silent Aim", key: "silentAim"))
         aimStatus.numberOfLines = 0; aimStatus.font = .monospacedSystemFont(ofSize: 10, weight: .regular); aimStatus.textColor = .systemGreen
         pages[6].addArrangedSubview(aimStatus)
-        pages[6].addArrangedSubview(note("Нужен IPA с переходом v15 и эта dylib. Обычное огнестрельное оружие, пешком. Стены обрабатывает сама игра. Камера не поворачивается."))
         pages[6].addArrangedSubview(toggle("Точка: голова (выкл. — корпус)", key: "aimHead"))
         pages[6].addArrangedSubview(note("Радиус FOV в экранных точках"))
         let aimFOV = UISlider(); aimFOV.minimumValue = 30; aimFOV.maximumValue = 300; aimFOV.value = Float(MenuPreferences.shared.fovRadius)
@@ -1055,7 +1034,6 @@ private final class MenuController: UIViewController {
             MenuPreferences.shared.aimMiss = Double(miss?.value ?? 0)
             missLabel?.text = String(format: "Шанс пропуска наведения: %.0f%%", MenuPreferences.shared.aimMiss); self?.onChange?()
         }, for: .valueChanged); pages[6].addArrangedSubview(miss)
-        pages[6].addArrangedSubview(note("Пропуск оставляет исходное направление — обычный выстрел всё равно может попасть. HP ≤ 0 и штатные состояния DYING/DEAD всегда исключены. Особые серверные стадии ранения требуют проверки."))
         pages[6].addArrangedSubview(button("Исключения: ID и ники", "aimWhitelist"))
         pages[6].addArrangedSubview(button("Добавить текущую цель в исключения", "aimExcludeTarget"))
         pages[6].addArrangedSubview(button("Очистить исключения", "aimClearWhitelist"))
@@ -1073,10 +1051,9 @@ private final class MenuController: UIViewController {
         stretchStatus.font = .systemFont(ofSize: 10); stretchStatus.textColor = .systemOrange; stretchStatus.numberOfLines = 0
         pages[7].addArrangedSubview(stretchStatus)
         pages[7].addArrangedSubview(button("Вернуть обычное изображение", "stretchReset"))
-        pages[7].addArrangedSubview(note("Изменяется соотношение сторон 3D-камеры. Окно игры и HUD не растягиваются за экран. Нужна IPA v17; в старой IPA функция не применяется."))
         pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
         pages[7].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
-        pages[7].addArrangedSubview(toggle("Плавающая кнопка BR", key: "bubble", fallback: true))
+        pages[7].addArrangedSubview(toggle("Плавающая кнопка", key: "bubble", fallback: true))
         pages[7].addArrangedSubview(toggle("Анимации", key: "animations", fallback: true))
         pages[7].addArrangedSubview(toggle("Увеличенное меню", key: "large"))
         pages[7].addArrangedSubview(note("Прозрачность"))
@@ -1092,9 +1069,8 @@ private final class MenuController: UIViewController {
             self?.view.layer.borderColor = MenuPreferences.shared.accent.withAlphaComponent(0.35).cgColor
             self?.onChange?()
         }, for: .valueChanged); pages[7].addArrangedSubview(colors)
-        pages[7].addArrangedSubview(note("Перетаскивай меню за заголовок, BR — за кнопку. Открыть или скрыть: два касания тремя пальцами. Настройки сохраняются."))
-        bubble.setTitle("BR", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
-        bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Развернуть диагностику"
+        bubble.setTitle("RM", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
+        bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Открыть React Modifications"
         bubble.addAction(UIAction { [weak self] _ in self?.onAction?("collapse") }, for: .touchUpInside)
         bubble.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
         bubble.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(bubble)
@@ -1183,3 +1159,4 @@ private final class PassthroughWindow: UIWindow {
         return super.hitTest(point, with: event)
     }
 }
+
