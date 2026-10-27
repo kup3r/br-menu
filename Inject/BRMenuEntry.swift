@@ -64,6 +64,9 @@ public final class BRMenuEntry: NSObject {
         #endif
         let menu = DiagnosticMenu()
         menu.playerProvider = { walls, distance in BRPlayerSnapshot.snapshot(ignoringRenderFlags: walls, maxDistance: distance) }
+        menu.commandSendProvider = { BRPlayerSnapshot.sendChatCommand($0) }
+        menu.commandAliasesConfigurationProvider = { BRPlayerSnapshot.configureChatAliases(ReactCommandAliases.mapping($0)) }
+        menu.extensionStatusProvider = { BRPlayerSnapshot.extensionStatus() }
         menu.shotEventProvider = { BRPlayerSnapshot.ownShotCount() }
         menu.playerStatusProvider = { BRPlayerSnapshot.status() }
         menu.projectionProvider = { BRPlayerSnapshot.projectionMatrix().map { $0.doubleValue } }
@@ -90,3 +93,4 @@ public final class BRMenuEntry: NSObject {
         menus.removeValue(forKey: scene.session.persistentIdentifier)?.uninstall()
     }
 }
+

@@ -41,6 +41,9 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 
     private var coordinateText = "Позиция: источник не найден"
     private var gestures: [UITapGestureRecognizer] = []
+    public var commandSendProvider: ((String) -> String)?
+    public var commandAliasesConfigurationProvider: ((String) -> Void)?
+    public var extensionStatusProvider: (() -> String)?
     public var shotEventProvider: (() -> UInt64)?
     private var lastShotEvent: UInt64?
     private let shotAudio = ReactShotAudio()
@@ -226,6 +229,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         placeWindow()
         sampleGameRate()
         applyStretch()
+        host.extensionStatus.text = extensionStatusProvider?() ?? ""
         if MenuPreferences.shared.flag("silentAim") {
             let candidates = (lastAimState["candidates"] as? NSNumber)?.intValue ?? 0
             host.aimStatus.text = "Целей: \(candidates)"
@@ -424,6 +428,11 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
+        values["cameraFOV"] = MenuPreferences.shared.cameraFOV
+        values["worldHour"] = MenuPreferences.shared.worldHour
+        values["worldMinute"] = MenuPreferences.shared.worldMinute
+        values["worldWeather"] = MenuPreferences.shared.worldWeather
+        commandAliasesConfigurationProvider?(MenuPreferences.shared.commandAliases)
         controlConfigurationProvider?(values)
         aspectConfigurationProvider?(MenuPreferences.shared.stretch)
         let prefs = MenuPreferences.shared
@@ -451,25 +460,27 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { appWindow?.makeKey() }
     private func composeCommand() {
         guard host.presentedViewController == nil else { return }
-        let alert = UIAlertController(title: "Быстрая команда", message: "Введи /cf и аргументы. Развёрнутая команда будет скопирована — вставь её в чат игры.", preferredStyle: .alert)
+        let alert = UIAlertController(title: "Быстрая команда", message: commandSendProvider == nil ? "Команда будет скопирована" : "Введи /cf и аргументы. Команда отправится в игру", preferredStyle: .alert)
         alert.addTextField { $0.placeholder = "/cf 17"; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
-        alert.addAction(UIAlertAction(title: "Скопировать", style: .default) { [weak self, weak alert] _ in
+        alert.addAction(UIAlertAction(title: commandSendProvider == nil ? "Скопировать" : "Отправить", style: .default) { [weak self, weak alert] _ in
             guard let self else { return }; self.appWindow?.makeKey()
             let command = ReactCommandAliases.expand(alert?.textFields?.first?.text ?? "", rules: MenuPreferences.shared.commandAliases)
             guard !command.isEmpty else { return }
-            UIPasteboard.general.string = command; self.host.actionStatus.text = "Скопировано: " + command
+            if let send = self.commandSendProvider { self.host.actionStatus.text = send(command) }
+            else { UIPasteboard.general.string = command; self.host.actionStatus.text = "Скопировано: " + command }
         })
         window?.makeKey(); host.present(alert, animated: true)
     }
     private func editCommandAliases() {
         guard host.presentedViewController == nil else { return }
-        let alert = UIAlertController(title: "Сокращения команд", message: "Формат: /cf=/cuff; /короткая=/полная. Применяется в кнопке «Быстрая команда».", preferredStyle: .alert)
+        let alert = UIAlertController(title: "Сокращения команд", message: "Формат: /cf=/cuff; /короткая=/полная. Включи «Сокращения в чате» для автоматической замены.", preferredStyle: .alert)
         alert.addTextField { $0.text = MenuPreferences.shared.commandAliases; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
         alert.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak alert] _ in
             self?.appWindow?.makeKey()
             MenuPreferences.shared.commandAliases = String((alert?.textFields?.first?.text ?? "").prefix(2048))
+            self?.configureControls()
         })
         window?.makeKey(); host.present(alert, animated: true)
     }
@@ -567,10 +578,26 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim"]
+    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
+    var cameraFOV: Double {
+        get { defaults.object(forKey: "cameraFOV") == nil ? 70 : max(50, min(120, defaults.double(forKey: "cameraFOV"))) }
+        set { defaults.set(newValue, forKey: "cameraFOV") }
+    }
+    var worldHour: Double {
+        get { max(0, min(23, defaults.double(forKey: "worldHour"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldHour") }
+    }
+    var worldMinute: Double {
+        get { max(0, min(59, defaults.double(forKey: "worldMinute"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldMinute") }
+    }
+    var worldWeather: Double {
+        get { max(0, min(21, defaults.double(forKey: "worldWeather"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldWeather") }
+    }
     var commandAliases: String {
         get { defaults.string(forKey: "commandAliases") ?? "/cf=/cuff" }
         set { defaults.set(newValue, forKey: "commandAliases") }
@@ -877,6 +904,7 @@ private final class MenuController: UIViewController {
     var messages: [String] = []
     var collapsed = false, rightSide = true
     let aimStatus = UILabel()
+    let extensionStatus = UILabel()
     private let stretchSlider = UISlider()
     private let stretchLabel = UILabel()
     let stretchStatus = UILabel()
@@ -1127,6 +1155,30 @@ private final class MenuController: UIViewController {
             self.stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", MenuPreferences.shared.stretch)
             self.onChange?()
         }, for: .valueChanged)
+        extensionStatus.numberOfLines = 0; extensionStatus.font = .systemFont(ofSize: 11); extensionStatus.textColor = .systemCyan
+        pages[7].addArrangedSubview(extensionStatus)
+        pages[7].addArrangedSubview(toggle("Свой FOV камеры", key: "cameraFOVOverride"))
+        let cameraFOVLabel = note(String(format: "FOV камеры: %.0f°", MenuPreferences.shared.cameraFOV))
+        let cameraFOV = UISlider(); cameraFOV.minimumValue = 50; cameraFOV.maximumValue = 120; cameraFOV.value = Float(MenuPreferences.shared.cameraFOV)
+        cameraFOV.addAction(UIAction { [weak self, weak cameraFOV] _ in
+            MenuPreferences.shared.cameraFOV = Double(cameraFOV?.value ?? 70)
+            cameraFOVLabel.text = String(format: "FOV камеры: %.0f°", MenuPreferences.shared.cameraFOV); self?.onChange?()
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(cameraFOVLabel); pages[7].addArrangedSubview(cameraFOV)
+        pages[7].addArrangedSubview(toggle("Своё время суток", key: "worldTimeOverride"))
+        let hourLabel = note(String(format: "Часы: %.0f", MenuPreferences.shared.worldHour))
+        let hour = UISlider(); hour.minimumValue = 0; hour.maximumValue = 23; hour.value = Float(MenuPreferences.shared.worldHour)
+        hour.addAction(UIAction { [weak self, weak hour] _ in MenuPreferences.shared.worldHour = Double(hour?.value ?? 0); hourLabel.text = String(format: "Часы: %.0f", MenuPreferences.shared.worldHour); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(hourLabel); pages[7].addArrangedSubview(hour)
+        let minuteLabel = note(String(format: "Минуты: %.0f", MenuPreferences.shared.worldMinute))
+        let minute = UISlider(); minute.minimumValue = 0; minute.maximumValue = 59; minute.value = Float(MenuPreferences.shared.worldMinute)
+        minute.addAction(UIAction { [weak self, weak minute] _ in MenuPreferences.shared.worldMinute = Double(minute?.value ?? 0); minuteLabel.text = String(format: "Минуты: %.0f", MenuPreferences.shared.worldMinute); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(minuteLabel); pages[7].addArrangedSubview(minute)
+        pages[7].addArrangedSubview(toggle("Своя погода", key: "worldWeatherOverride"))
+        let weatherLabel = note(String(format: "Погода: ID %.0f", MenuPreferences.shared.worldWeather))
+        let weather = UISlider(); weather.minimumValue = 0; weather.maximumValue = 21; weather.value = Float(MenuPreferences.shared.worldWeather)
+        weather.addAction(UIAction { [weak self, weak weather] _ in MenuPreferences.shared.worldWeather = Double(weather?.value ?? 0); weatherLabel.text = String(format: "Погода: ID %.0f", MenuPreferences.shared.worldWeather); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(weatherLabel); pages[7].addArrangedSubview(weather)
         let aspectPresets = UIStackView(); aspectPresets.spacing = 6; aspectPresets.distribution = .fillEqually
         aspectPresets.addArrangedSubview(button("Обычный", "aspectOriginal"))
         aspectPresets.addArrangedSubview(button("Планшет", "aspectTablet"))
@@ -1136,6 +1188,7 @@ private final class MenuController: UIViewController {
         stretchStatus.font = .systemFont(ofSize: 10); stretchStatus.textColor = .systemOrange; stretchStatus.numberOfLines = 0
         pages[7].addArrangedSubview(stretchStatus)
         pages[7].addArrangedSubview(button("Вернуть обычное изображение", "stretchReset"))
+        pages[7].addArrangedSubview(toggle("Сокращения в чате", key: "aliasesAuto"))
         pages[7].addArrangedSubview(button("Быстрая команда", "commandCompose"))
         pages[7].addArrangedSubview(button("Сокращения команд", "commandAliases"))
         pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
@@ -1303,3 +1356,4 @@ private final class ReactShotAudio {
         return data
     }
 }
+

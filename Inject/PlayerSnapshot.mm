@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 #include "AimMath.hpp"
+#include "ReactPolicies.hpp"
+#include <unordered_map>
 
 namespace {
 // Static evidence applies only to this exact blackrussia-client build.
@@ -394,6 +396,30 @@ bool aimBridgeReady(uint64_t base) {
     return true;
 }
 
+std::atomic<float> desiredCameraFOV{0};
+std::atomic<int> desiredTime{-1},desiredWeather{-1};
+std::atomic<bool> automaticAliases{false};
+std::mutex chatAliasMutex;
+std::unordered_map<std::string,std::string> chatAliases;
+bool extensionBridgeReady(uint64_t base) {
+    std::array<char,8> magic{};uint32_t version=0,count=0;
+    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT19",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=4)return false;
+    const uint32_t entries[]={0x9f5fc4,0xbf228,0xa524f4,0xa76558};
+    for(uint32_t i=0;i<4;++i) {
+        std::array<uint32_t,4> record{};uint32_t opcode=0;
+        const uint32_t bridge=0x3000+i*0x300,trampoline=0x3c00+i*0x20,symbol=0x3d00+i*0x40;
+        const uint32_t branch=0x14000000U|((uint32_t((int64_t(bridge)-entries[i])/4))&0x3ffffffU);
+        if(!read(base+0x3f10+i*16,record)||record!=std::array<uint32_t,4>{entries[i],bridge,trampoline,symbol}||!read(base+entries[i],opcode)||opcode!=branch)return false;
+    }
+    return true;
+}
+bool chatCommandToken(const std::string &s) {
+    if(s.size()<2||s.size()>49||s[0]!='/')return false;
+    for(size_t i=1;i<s.size();++i)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='_'))return false;
+    return true;
+}
+std::string lowerCommand(std::string value) {for(char &c:value)if(c>='A'&&c<='Z')c=char(c-'A'+'a');return value;}
+
 std::atomic<float> projectionScale{1};
 std::atomic<uint64_t> projectionCallbacks{0};
 bool aspectBridgeReady(uint64_t base) {
@@ -677,7 +703,54 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
     return BRAim::projectionRatio(naturalAspect,scale);
 }
 
+extern "C" __attribute__((used,visibility("default")))
+float BRMenuFOV19(float natural) noexcept {return React19::fov(natural,desiredCameraFOV.load(std::memory_order_relaxed));}
+extern "C" __attribute__((used,visibility("default")))
+uint64_t BRMenuClock19(uint32_t hour,uint32_t minute) noexcept {const int value=desiredTime.load();return React19::clock(hour,minute,value<0?-1:value/60,value<0?-1:value%60);}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuWeather19(uint32_t natural) noexcept {return React19::weather(natural,desiredWeather.load());}
+extern "C" __attribute__((used,visibility("default")))
+const char *BRMenuChat19(const char *input) noexcept {
+    if(!input||!automaticAliases.load())return input;
+    try {
+        std::string text;const uint64_t address=reinterpret_cast<uint64_t>(input);bool terminated=false;
+        for(size_t offset=0;offset<1024;) {
+            std::array<char,64> chunk{};const size_t size=std::min(size_t(64),size_t(4096-((address+offset)&4095)));
+            if(!copy(address+offset,chunk.data(),size))return input;
+            for(size_t i=0;i<size;++i) {if(!chunk[i]){terminated=true;break;}text.push_back(chunk[i]);}
+            if(terminated)break;offset+=size;
+        }
+        if(!terminated||text.empty()||text[0]!='/')return input;
+        const size_t boundary=text.find_first_of(" \t\r\n");
+        const std::string command=lowerCommand(text.substr(0,boundary));std::string replacement;
+        {std::lock_guard<std::mutex> lock(chatAliasMutex);auto i=chatAliases.find(command);if(i==chatAliases.end())return input;replacement=i->second;}
+        thread_local std::string output;output=replacement+(boundary==std::string::npos?"":text.substr(boundary));
+        return output.c_str();
+    }catch(...){return input;}
+}
+
 @implementation BRPlayerSnapshot
++ (NSString *)extensionStatus {return extensionBridgeReady(imageBase())?@"Дополнительные настройки подключены":@"Нужен обновлённый IPA";}
++ (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules {
+    std::unordered_map<std::string,std::string> next;
+    for(NSString *key in rules) {
+        NSString *value=rules[key];if(![key isKindOfClass:NSString.class]||![value isKindOfClass:NSString.class])continue;
+        std::string a=key.UTF8String?:"",b=value.UTF8String?:"";
+        if(chatCommandToken(a)&&chatCommandToken(b))next[lowerCommand(a)]=b;
+        if(next.size()>=64)break;
+    }
+    std::lock_guard<std::mutex> lock(chatAliasMutex);chatAliases=std::move(next);
+}
++ (NSString *)sendChatCommand:(NSString *)command {
+    if(!NSThread.isMainThread)return @"Отправляй команду из меню";
+    const uint64_t base=imageBase();Local owner;
+    if(!extensionBridgeReady(base)||!getLocal(owner))return @"Открой игру и подключись к серверу";
+    NSData *utf8=[command dataUsingEncoding:NSUTF8StringEncoding];
+    if(![command hasPrefix:@"/"]||utf8.length<2||utf8.length>512||[command rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location!=NSNotFound)return @"Некорректная команда";
+    // The verified exported routine immediately copies the UTF-8 string into its queued job.
+    using Send=void(*)(const char *);reinterpret_cast<Send>(base+0x3c60)(command.UTF8String);
+    return @"Команда отправлена";
+}
 + (uint64_t)ownShotCount { return ownShotEvents.load(std::memory_order_relaxed); }
 + (void)configureAspect:(double)scale {
     projectionScale.store(std::isfinite(scale)?float(std::clamp(scale,1.0,1.6)):1,std::memory_order_relaxed);
@@ -749,7 +822,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        const Flight old=flight;flight={};assists={};desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -762,6 +835,13 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
 + (void)configureControls:(NSDictionary<NSString *,NSNumber *> *)settings {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
+        const bool extended=extensionBridgeReady(imageBase());
+        const double fov=settings[@"cameraFOV"].doubleValue;
+        desiredCameraFOV.store(extended&&settings[@"cameraFOVOverride"].boolValue&&std::isfinite(fov)?float(std::clamp(fov,50.0,120.0)):0);
+        const int hour=settings[@"worldHour"].intValue,minute=settings[@"worldMinute"].intValue,weather=settings[@"worldWeather"].intValue;
+        desiredTime.store(extended&&settings[@"worldTimeOverride"].boolValue?std::clamp(hour,0,23)*60+std::clamp(minute,0,59):-1);
+        desiredWeather.store(extended&&settings[@"worldWeatherOverride"].boolValue?std::clamp(weather,0,21):-1);
+        automaticAliases.store(extended&&settings[@"aliasesAuto"].boolValue);
         assists.health=settings[@"autoHealth"].boolValue;assists.armor=settings[@"autoArmor"].boolValue;
         assists.stamina=settings[@"stamina"].boolValue;assists.vehicleHealth=settings[@"autoVehicleHealth"].boolValue;
         assists.slowFall=settings[@"slowFall"].boolValue;assists.noClip=settings[@"noClip"].boolValue;
@@ -1243,3 +1323,4 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
     }
 }
 @end
+

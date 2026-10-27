@@ -7,6 +7,9 @@ on:
       - 'Sources/DiagnosticMenu/**'
       - 'Inject/BRMenuEntry.swift'
       - 'Inject/PlayerSnapshot.*'
+      - 'Inject/ReactPolicies.hpp'
+      - 'scripts/*client19*'
+      - 'scripts/react_policy_tests.cpp'
       - 'scripts/command_alias_tests.swift'
       - 'scripts/build_dylib.sh'
       - 'scripts/license_config.py'
@@ -61,6 +64,11 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Test native override bounds and bridge layout
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -Werror scripts/react_policy_tests.cpp -o /tmp/react-policy-tests
+          /tmp/react-policy-tests
+          python3 scripts/check_client19.py
       - name: Test command expansion and argument preservation
         run: |
           swiftc Sources/DiagnosticMenu/ReactCommands.swift scripts/command_alias_tests.swift -o /tmp/react-command-tests
@@ -80,4 +88,5 @@ jobs:
             dist/BRMenuInject.dylib
             dist/BRMenuInject-SHA256.txt
           retention-days: 7
+
 

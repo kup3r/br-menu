@@ -20,6 +20,7 @@ xcrun --sdk iphoneos swiftc -swift-version 5 -O -emit-library \
   Sources/DiagnosticMenu/DiagnosticMenu.swift Sources/DiagnosticMenu/ReactCommands.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
   build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework GLKit -framework QuartzCore -framework Security -framework AVFoundation -framework UniformTypeIdentifiers \
   -Xlinker -u -Xlinker _BRMenuQueueHook15 -Xlinker -u -Xlinker _BRMenuAspectHook17 \
+  -Xlinker -u -Xlinker _BRMenuFOV19 -Xlinker -u -Xlinker _BRMenuClock19 -Xlinker -u -Xlinker _BRMenuWeather19 -Xlinker -u -Xlinker _BRMenuChat19 \
   -Xlinker -install_name -Xlinker '@rpath/BRMenuInject.dylib' \
   -o dist/BRMenuInject.dylib
 xcrun lipo dist/BRMenuInject.dylib -verify_arch arm64
@@ -33,3 +34,6 @@ xcrun nm -gU dist/BRMenuInject.dylib > dist/dylib-exports.txt
 python3 -c "from pathlib import Path; assert '_BRMenuQueueHook15' in Path('dist/dylib-exports.txt').read_text(), 'shot hook export missing'"
 
 python3 -c "from pathlib import Path; assert '_BRMenuAspectHook17' in Path('dist/dylib-exports.txt').read_text(), 'aspect hook export missing'"
+
+
+python3 -c "from pathlib import Path; e=Path('dist/dylib-exports.txt').read_text(); assert all(x in e for x in ['_BRMenuFOV19','_BRMenuClock19','_BRMenuWeather19','_BRMenuChat19'])"
