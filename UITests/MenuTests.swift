@@ -50,6 +50,8 @@ final class MenuTests: XCTestCase {
         open(6)
         XCTAssertTrue(app.switches["diagnostics.silentAim"].waitForExistence(timeout: 5))
         open(7)
+        XCTAssertTrue(app.switches["diagnostics.autoEvent"].exists)
+        XCTAssertTrue(app.switches["diagnostics.fpsUp"].exists)
         XCTAssertTrue(app.switches["diagnostics.animations"].exists)
         open(0)
     }

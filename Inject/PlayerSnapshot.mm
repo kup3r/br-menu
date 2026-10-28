@@ -861,6 +861,7 @@ bool liveConnected(Local &s) {
 }
 #include "Chams24.inc"
 #include "Water24.inc"
+#include "Event25.inc"
 #include "Damage24.inc"
 using FireInput=int32_t(*)(void *);
 int32_t triggerInput(void *pad,FireInput original,bool pressed) noexcept {
@@ -1011,6 +1012,8 @@ uint32_t BRMenuSound21(uint64_t,uint64_t entity,uint64_t event,uint64_t,uint64_t
 }
 extern "C" __attribute__((used,visibility("default")))
 uint32_t BRMenuWater24(uint64_t ped) noexcept {return waterDecision24(ped);}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuIncoming25(uint32_t color,const char *message) noexcept {(void)color;incomingEvent25(message);}
 extern "C" __attribute__((used,visibility("default")))
 uint32_t BRMenuLogo21() noexcept {return hideLogoEnabled.load()?0:1;}
 extern "C" __attribute__((used,visibility("default")))
@@ -1207,7 +1210,7 @@ void moveCamera21(const AimActor &target,double now) {
 
 + (void)stopControls {
     @synchronized(self) {
-        stopChams24();waterWalk24.store(false);damageFactor24.store(1);
+        autoEvent25.store(false);stopChams24();waterWalk24.store(false);damageFactor24.store(1);
         const Flight old=flight;flight={};restoreStrobe22();restoreHydraulics22();carTrack22={};rapid22={};collectSkeleton22.store(false);
         medicineEnabled22=false;medicine22={};{std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={};}
         assists={};runTrack={};displayBalance21.store(-1);updateDisplayBalance21();regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
@@ -1223,6 +1226,7 @@ void moveCamera21(const AimActor &target,double now) {
 + (void)configureControls:(NSDictionary<NSString *,NSNumber *> *)settings {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
+        autoEvent25.store(settings[@"autoEvent"].boolValue);
         const bool extended=extensionBridgeReady(imageBase());
         waterWalk24.store(settings[@"waterWalk"].boolValue&&waterBridge24(imageBase()));
         const double damage=settings[@"damageFactor"].doubleValue;damageFactor24.store(settings[@"extraDamage"].boolValue&&std::isfinite(damage)?std::clamp(damage,1.0,5.0):1);

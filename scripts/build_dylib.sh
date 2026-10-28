@@ -17,12 +17,12 @@ xcrun --sdk iphoneos clang++ -arch arm64 -isysroot "$sdk_path" \
   -c Inject/PlayerSnapshot.mm -o build/inject/PlayerSnapshot.o
 xcrun --sdk iphoneos swiftc -swift-version 5 -O -emit-library \
   -module-name BRMenuInject -import-objc-header Inject/PlayerSnapshot.h -target arm64-apple-ios18.0 -sdk "$sdk_path" \
-  Sources/DiagnosticMenu/DiagnosticMenu.swift Sources/DiagnosticMenu/ReactCommands.swift Sources/DiagnosticMenu/ReactHostUI.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
-  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework OpenGLES -framework GLKit -framework QuartzCore -framework Security -framework AVFoundation -framework UniformTypeIdentifiers \
+  Sources/DiagnosticMenu/DiagnosticMenu.swift Sources/DiagnosticMenu/ReactEvent25.swift Sources/DiagnosticMenu/ReactSound25.swift Sources/DiagnosticMenu/ReactPerformance25.swift Sources/DiagnosticMenu/ReactCommands.swift Sources/DiagnosticMenu/ReactHostUI.swift Inject/BRMenuEntry.swift "${license_sources[@]}" "${license_flags[@]}" \
+  build/inject/Bootstrap.o build/inject/PlayerSnapshot.o -lc++ -framework UIKit -framework Foundation -framework OpenGLES -framework MetalKit -framework GLKit -framework QuartzCore -framework Security -framework AVFoundation -framework UniformTypeIdentifiers \
   -Xlinker -u -Xlinker _BRMenuQueueHook15 -Xlinker -u -Xlinker _BRMenuAspectHook17 \
   -Xlinker -u -Xlinker _BRMenuFOV19 -Xlinker -u -Xlinker _BRMenuClock19 -Xlinker -u -Xlinker _BRMenuWeather19 -Xlinker -u -Xlinker _BRMenuChat19 \
   -Xlinker -u -Xlinker _BRMenuLag20 -Xlinker -u -Xlinker _BRMenuFireHeld20 -Xlinker -u -Xlinker _BRMenuFirePressed20 -Xlinker -u -Xlinker _BRMenuStun20 -Xlinker -u -Xlinker _BRMenuFreeze20 \
-  -Xlinker -u -Xlinker _BRMenuWater24 -Xlinker -u -Xlinker _BRMenuTrace21 -Xlinker -u -Xlinker _BRMenuSound21 -Xlinker -u -Xlinker _BRMenuImpact21 -Xlinker -u -Xlinker _BRMenuLogo21 -Xlinker -u -Xlinker _BRMenuChat21 \
+  -Xlinker -u -Xlinker _BRMenuIncoming25 -Xlinker -u -Xlinker _BRMenuWater24 -Xlinker -u -Xlinker _BRMenuTrace21 -Xlinker -u -Xlinker _BRMenuSound21 -Xlinker -u -Xlinker _BRMenuImpact21 -Xlinker -u -Xlinker _BRMenuLogo21 -Xlinker -u -Xlinker _BRMenuChat21 \
   -Xlinker -install_name -Xlinker '@rpath/BRMenuInject.dylib' \
   -o dist/BRMenuInject.dylib
 xcrun lipo dist/BRMenuInject.dylib -verify_arch arm64

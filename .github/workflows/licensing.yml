@@ -8,11 +8,13 @@ on:
       - 'Inject/BRMenuEntry.swift'
       - 'Inject/PlayerSnapshot.*'
       - 'Inject/*24*'
+      - 'Inject/*25*'
       - 'Inject/ReactPolicies.hpp'
       - 'scripts/*client19*'
       - 'scripts/*client20*'
       - 'scripts/*client21*'
       - 'scripts/*24*'
+      - 'scripts/*25*'
       - 'scripts/react_policy_tests.cpp'
       - 'scripts/command_alias_tests.swift'
       - 'scripts/build_dylib.sh'
@@ -83,10 +85,17 @@ jobs:
           /tmp/react-adapter-tests/bin/python scripts/test_client20_adapters.py
           /tmp/react-adapter-tests/bin/python scripts/test_client21_adapters.py
           /tmp/react-adapter-tests/bin/python scripts/test_client24_adapter.py
+          /tmp/react-adapter-tests/bin/python scripts/test_client25_adapter.py
       - name: Test command expansion and argument preservation
         run: |
           swiftc Sources/DiagnosticMenu/ReactCommands.swift scripts/command_alias_tests.swift -o /tmp/react-command-tests
           /tmp/react-command-tests
+      - name: Test auto-event policy and generated sound bank
+        run: |
+          swiftc Sources/DiagnosticMenu/ReactEvent25.swift scripts/event25_tests.swift -o /tmp/event25-tests
+          /tmp/event25-tests
+          swiftc Sources/DiagnosticMenu/ReactSound25.swift scripts/sound25_tests.swift -o /tmp/sound25-tests
+          /tmp/sound25-tests
       - name: Build licensed menu for the live key server
         env:
           BRMENU_LICENSED: '1'
