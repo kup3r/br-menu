@@ -22,6 +22,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
     public var projectionProvider: (() -> [Double])?
     public var aspectConfigurationProvider: ((Double) -> Void)?
     public var aspectStateProvider: (() -> [String: Any])?
+    public var medicineConfigurationProvider: ((String, Double, Double, Bool) -> Void)?
     public var clearNativeChatProvider: (() -> Bool)?
     public var visualTickProvider: (() -> Void)?
     public var clearChatControllerProvider: ((NSObject) -> Bool)?
@@ -400,6 +401,10 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
             prefs.aimWhitelist = prefs.aimWhitelist.isEmpty ? String(id) : prefs.aimWhitelist + ", " + String(id)
             configureControls(); decor.hideAim(); append("ID \(id) добавлен в исключения")
         case "aimClearWhitelist": MenuPreferences.shared.aimWhitelist = ""; configureControls(); append("Исключения очищены")
+        case "reconnect": runGame(action, [:]); configureControls()
+        case "medicineSettings": requestMedicine()
+        case "vehicleColor": requestVehicleColors()
+        case "hydraulicHop", "launchActivate", "teleportImpact": runGame(action, [:])
         case "waypoint", "waypointCancel": runGame(action, [:])
         case "stretchReset": MenuPreferences.shared.stretch = 1; host.resetStretch(); restoreStretch()
         case "teleportXYZ": requestCoordinates()
@@ -457,6 +462,10 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         values["triggerRadius"] = MenuPreferences.shared.triggerRadius
         values["triggerDelay"] = MenuPreferences.shared.triggerDelay
         values["lagInterval"] = MenuPreferences.shared.lagInterval
+        values["accelerationFactor"] = MenuPreferences.shared.accelerationFactor
+        values["espSkeleton"] = MenuPreferences.shared.flag("espSkeleton") ? 1 : 0
+        values["espSilhouette"] = MenuPreferences.shared.flag("espSilhouette") ? 1 : 0
+        medicineConfigurationProvider?(MenuPreferences.shared.medicineCommand, MenuPreferences.shared.medicineThreshold, MenuPreferences.shared.medicineInterval, MenuPreferences.shared.flag("autoMedicine"))
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
         values["runMultiplier"] = MenuPreferences.shared.runMultiplier
@@ -469,6 +478,31 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         aspectConfigurationProvider?(MenuPreferences.shared.stretch)
         let prefs = MenuPreferences.shared
         aimConfigurationProvider?(prefs.flag("silentAim"), prefs.fovRadius, prefs.aimMiss, prefs.flag("aimHead"), prefs.aimWhitelist)
+    }
+    private func requestMedicine() {
+        let prefs = MenuPreferences.shared
+        let alert = UIAlertController(title: "Автоаптечка", message: "Введи команду использования аптечки на своём сервере. Порог HP и пауза задаются ниже.", preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "/команда аптечки"; $0.text = prefs.medicineCommand; $0.autocapitalizationType = .none; $0.autocorrectionType = .no }
+        alert.addTextField { $0.placeholder = "Порог HP: 1–99"; $0.keyboardType = .numberPad; $0.text = String(Int(prefs.medicineThreshold)) }
+        alert.addTextField { $0.placeholder = "Пауза: 5–120 секунд"; $0.keyboardType = .numberPad; $0.text = String(Int(prefs.medicineInterval)) }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak alert] _ in
+            let fields = alert?.textFields ?? []; let command = fields.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard fields.count == 3, command.hasPrefix("/"), command.utf8.count < 128, !command.contains("\n"),
+                  let threshold = Double(fields[1].text ?? ""), threshold.isFinite, (1...99).contains(threshold),
+                  let interval = Double(fields[2].text ?? ""), interval.isFinite, (5...120).contains(interval) else { self?.append("Проверь команду, порог HP и паузу"); return }
+            prefs.medicineCommand = command; prefs.medicineThreshold = threshold; prefs.medicineInterval = interval; self?.configureControls()
+        })
+        host.present(alert, animated: true)
+    }
+    private func requestVehicleColors() {
+        let alert = UIAlertController(title: "Цвет автомобиля", message: "Два ID из палитры клиента: 0–255. Изменение локальное.", preferredStyle: .alert)
+        for name in ["Основной цвет", "Второй цвет"] { alert.addTextField { $0.placeholder = name; $0.keyboardType = .numberPad } }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
+            guard let fields = alert?.textFields, fields.count == 2, let a = Int(fields[0].text ?? ""), let b = Int(fields[1].text ?? ""), (0...255).contains(a), (0...255).contains(b) else { self?.append("Цвета: ID от 0 до 255"); return }
+            self?.runGame("vehicleColor", ["primary": Double(a), "secondary": Double(b)])
+        }); host.present(alert, animated: true)
     }
     private func runGame(_ action: String, _ values: [String: Double]) {
         let result = gameActionProvider?(action, values) ?? "Источник управления не подключён"
@@ -623,7 +657,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
+    static let controlKeys = ["autoMedicine", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
@@ -699,6 +733,13 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "massFactor") == nil ? 1 : max(0.1, min(5, defaults.double(forKey: "massFactor"))) }
         set { defaults.set(newValue, forKey: "massFactor") }
     }
+    var accelerationFactor: Double {
+        get { defaults.object(forKey: "accelerationFactor") == nil ? 2 : max(1, min(5, defaults.double(forKey: "accelerationFactor"))) }
+        set { defaults.set(newValue, forKey: "accelerationFactor") }
+    }
+    var medicineCommand: String { get { defaults.string(forKey: "medicineCommand") ?? "" } set { defaults.set(newValue, forKey: "medicineCommand") } }
+    var medicineThreshold: Double { get { defaults.object(forKey: "medicineThreshold") == nil ? 35 : max(1, min(99, defaults.double(forKey: "medicineThreshold"))) } set { defaults.set(newValue, forKey: "medicineThreshold") } }
+    var medicineInterval: Double { get { defaults.object(forKey: "medicineInterval") == nil ? 15 : max(5, min(120, defaults.double(forKey: "medicineInterval"))) } set { defaults.set(newValue, forKey: "medicineInterval") } }
     var boostPower: Double {
         get { defaults.object(forKey: "boostPower") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "boostPower"))) }
         set { defaults.set(newValue, forKey: "boostPower") }
@@ -789,6 +830,7 @@ private final class DiagnosticDecor: UIView {
     struct Actor {
         var lo: SIMD3<Double>, hi: SIMD3<Double>, hp: Double, distance: Double
         var name: String, id: Int, armor: Double
+        var segments: [[Double]] = []
         var label = NSAttributedString(string: "")
         var labelWidth: CGFloat = 0
     }
@@ -796,7 +838,7 @@ private final class DiagnosticDecor: UIView {
     var horizontalScale: CGFloat = 1
     var receivedAt: CFTimeInterval = 0
     private var actors: [Actor] = []
-    private let espOutline = CAShapeLayer(), espLines = CAShapeLayer()
+    private let espOutline = CAShapeLayer(), espLines = CAShapeLayer(), skeletonLines = CAShapeLayer(), silhouettes = CAShapeLayer()
     private let hpBackground = CAShapeLayer(), hpGood = CAShapeLayer(), hpLow = CAShapeLayer()
     private var labelLayers: [Int: CATextLayer] = [:]
     var players: [[String: Any]] = [] {
@@ -808,7 +850,8 @@ private final class DiagnosticDecor: UIView {
                     hp: (player["hp"] as? NSNumber)?.doubleValue ?? 0,
                     distance: (player["distance"] as? NSNumber)?.doubleValue ?? -1,
                     name: player["name"] as? String ?? "Player", id: (player["id"] as? NSNumber)?.intValue ?? -1,
-                    armor: (player["armor"] as? NSNumber)?.doubleValue ?? 0)
+                    armor: (player["armor"] as? NSNumber)?.doubleValue ?? 0,
+                    segments: (player["segments"] as? [[NSNumber]] ?? []).prefix(128).map { $0.map { $0.doubleValue } }.filter { $0.count == 6 && $0.allSatisfy { $0.isFinite } })
             }
             rebuildLabels()
         }
@@ -851,9 +894,9 @@ private final class DiagnosticDecor: UIView {
         setNeedsDisplay()
     }
     func hideESP() {
-        guard espLines.path != nil || espOutline.path != nil || labelLayers.values.contains(where: { !$0.isHidden }) else { return }
+        guard silhouettes.path != nil || skeletonLines.path != nil || espLines.path != nil || espOutline.path != nil || labelLayers.values.contains(where: { !$0.isHidden }) else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { shape.path = nil }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { shape.path = nil }
         for label in labelLayers.values { label.isHidden = true }
         CATransaction.commit()
     }
@@ -862,12 +905,26 @@ private final class DiagnosticDecor: UIView {
         guard prefs.flag("esp"), let camera, camera.count == 16 else { hideESP(); return }
         let showBox = prefs.flag("espBox", fallback: true), showHP = prefs.flag("espHP", fallback: true)
         let maxDistance = prefs.maxDistance
-        let boxes = CGMutablePath(), backgrounds = CGMutablePath(), green = CGMutablePath(), red = CGMutablePath()
+        let boxes = CGMutablePath(), backgrounds = CGMutablePath(), green = CGMutablePath(), red = CGMutablePath(), skeleton = CGMutablePath(), silhouette = CGMutablePath()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         for label in labelLayers.values { label.isHidden = true }
         for actor in actors {
             if actor.distance >= 0 && actor.distance > maxDistance { continue }
             guard let box = screenBox(actor, camera: camera), box.width > 1, box.height > 2 else { continue }
+            if prefs.flag("espSkeleton") || prefs.flag("espSilhouette") {
+                for segment in actor.segments {
+                    guard let a = screenPoint(segment[0],segment[1],segment[2], camera: camera),
+                          let b = screenPoint(segment[3],segment[4],segment[5], camera: camera),
+                          hypot(a.x-b.x,a.y-b.y) < bounds.height else { continue }
+                    skeleton.move(to: a); skeleton.addLine(to: b)
+                    // Projected bone capsules give a translucent anatomical silhouette.
+                    let width = max(2, min(18, box.height * 0.065)), dx = b.x-a.x, dy = b.y-a.y, length = hypot(dx,dy)
+                    guard length > 0.1 else { continue }
+                    let nx = -dy/length*width/2, ny = dx/length*width/2
+                    silhouette.move(to: CGPoint(x:a.x+nx,y:a.y+ny)); silhouette.addLine(to: CGPoint(x:b.x+nx,y:b.y+ny))
+                    silhouette.addLine(to: CGPoint(x:b.x-nx,y:b.y-ny)); silhouette.addLine(to: CGPoint(x:a.x-nx,y:a.y-ny)); silhouette.closeSubpath()
+                }
+            }
             if showBox { boxes.addRect(box) }
             if showHP {
                 let bar = CGRect(x: box.minX-6, y: box.minY, width: 3, height: box.height)
@@ -883,8 +940,17 @@ private final class DiagnosticDecor: UIView {
             }
         }
         espOutline.path = boxes; espLines.path = boxes
+        skeletonLines.path = prefs.flag("espSkeleton") ? skeleton : nil; skeletonLines.strokeColor = prefs.accent.cgColor
+        silhouettes.path = prefs.flag("espSilhouette") ? silhouette : nil; silhouettes.fillColor = prefs.accent.withAlphaComponent(0.35).cgColor
         hpBackground.path = backgrounds; hpGood.path = green; hpLow.path = red
         CATransaction.commit()
+    }
+    private func screenPoint(_ x: Double,_ y: Double,_ z: Double, camera m: [Double]) -> CGPoint? {
+        let depth = m[2]*x + m[6]*y + m[10]*z + m[14]
+        guard depth.isFinite, depth > 0.05 else { return nil }
+        let px = (m[0]*x + m[4]*y + m[8]*z + m[12])/depth, py = (m[1]*x + m[5]*y + m[9]*z + m[13])/depth
+        guard px.isFinite, py.isFinite, (-1...2).contains(px), (-1...2).contains(py) else { return nil }
+        return CGPoint(x: bounds.midX+(CGFloat(px)*bounds.width-bounds.midX)*horizontalScale, y: CGFloat(py)*bounds.height)
     }
     private func screenBox(_ actor: Actor, camera m: [Double]) -> CGRect? {
         var x0 = Double.infinity, y0 = Double.infinity, x1 = -Double.infinity, y1 = -Double.infinity
@@ -913,8 +979,9 @@ private final class DiagnosticDecor: UIView {
         hud.numberOfLines = 2; hud.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         hud.backgroundColor = UIColor.black.withAlphaComponent(0.65)
         hud.layer.cornerRadius = 10; hud.clipsToBounds = true
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { layer.addSublayer(shape) }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { layer.addSublayer(shape) }
         espOutline.fillColor = nil; espOutline.strokeColor = UIColor.black.withAlphaComponent(0.8).cgColor; espOutline.lineWidth = 3
+        skeletonLines.fillColor = nil; skeletonLines.lineWidth = 1.5; skeletonLines.lineCap = .round; skeletonLines.lineJoin = .round
         espLines.fillColor = nil; espLines.strokeColor = MenuPreferences.shared.accent.cgColor; espLines.lineWidth = 1
         hpBackground.fillColor = UIColor.black.withAlphaComponent(0.8).cgColor
         hpGood.fillColor = UIColor.systemGreen.cgColor; hpLow.fillColor = UIColor.systemRed.cgColor
@@ -941,7 +1008,7 @@ private final class DiagnosticDecor: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { shape.frame = bounds }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { shape.frame = bounds }
         CATransaction.commit()
         renderESP()
         brand.frame = CGRect(x: safe.left + 10, y: max(safe.top, bounds.height-safe.bottom-24), width: max(0, bounds.width-safe.left-safe.right-20), height: 20)
@@ -1074,7 +1141,7 @@ private final class MenuController: UIViewController {
         log.isEditable = false; log.font = .monospacedSystemFont(ofSize: 10, weight: .regular); log.textColor = .secondaryLabel
         log.backgroundColor = UIColor.white.withAlphaComponent(0.04); log.layer.cornerRadius = 10
         log.heightAnchor.constraint(equalToConstant: 75).isActive = true
-        pages[0].addArrangedSubview(log); pages[0].addArrangedSubview(button("Очистить журнал", "clear"))
+        pages[0].addArrangedSubview(log); pages[0].addArrangedSubview(button("Очистить журнал", "clear")); pages[0].addArrangedSubview(button("Переподключиться к серверу", "reconnect"))
         pages[1].addArrangedSubview(toggle("ESP", key: "esp"))
         pages[1].addArrangedSubview(note("Данные игроков: 10–30 Гц. Проекция боксов — каждый кадр экрана."))
         let rate = UISlider(); rate.minimumValue = 10; rate.maximumValue = 30; rate.value = Float(MenuPreferences.shared.espRate)
@@ -1083,6 +1150,8 @@ private final class MenuController: UIViewController {
         pages[1].addArrangedSubview(rate)
         pages[1].addArrangedSubview(toggle("За стенами", key: "espWalls", fallback: true))
         pages[1].addArrangedSubview(toggle("Боксы", key: "espBox", fallback: true))
+        pages[1].addArrangedSubview(toggle("Скелет · реальные кости", key: "espSkeleton"))
+        pages[1].addArrangedSubview(toggle("Силуэт по костям", key: "espSilhouette"))
         pages[1].addArrangedSubview(toggle("Ник и ID", key: "espName", fallback: true))
         pages[1].addArrangedSubview(toggle("HP и полоса здоровья", key: "espHP", fallback: true))
         pages[1].addArrangedSubview(toggle("Броня", key: "espArmor"))
@@ -1127,6 +1196,7 @@ private final class MenuController: UIViewController {
         pages[2].addArrangedSubview(button("Телепорт по метке на карте", "waypoint"))
         pages[2].addArrangedSubview(button("Отменить телепорт по метке", "waypointCancel"))
         pages[2].addArrangedSubview(button("Телепорт по XYZ", "teleportXYZ"))
+        pages[2].addArrangedSubview(button("К последнему месту попадания", "teleportImpact"))
         pages[2].addArrangedSubview(button("К загруженному игроку по ID", "teleportPlayer"))
         pages[2].addArrangedSubview(button("К транспорту по ID", "teleportVehicle"))
         pages[2].addArrangedSubview(button("К ближайшему загруженному авто", "nearestVehicle"))
@@ -1166,7 +1236,21 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(toggle("Защита транспорта", key: "vehicleProof"))
         pages[3].addArrangedSubview(toggle("Автовосстановление HP авто", key: "autoVehicleHealth"))
         pages[3].addArrangedSubview(button("Поставить на колёса", "flipVehicle"))
-        pages[3].addArrangedSubview(note("Разовое ускорение · 1–3"))
+        pages[3].addArrangedSubview(toggle("Постоянное ускорение", key: "vehicleAcceleration"))
+        let accelerationLabel = note(String(format: "Множитель разгона: ×%.1f", MenuPreferences.shared.accelerationFactor))
+        let acceleration = UISlider(); acceleration.minimumValue = 1; acceleration.maximumValue = 5; acceleration.value = Float(MenuPreferences.shared.accelerationFactor)
+        acceleration.accessibilityLabel = "Множитель разгона"
+        acceleration.addAction(UIAction { [weak self, weak acceleration] _ in
+            MenuPreferences.shared.accelerationFactor = Double(acceleration?.value ?? 2)
+            accelerationLabel.text = String(format: "Множитель разгона: ×%.1f", MenuPreferences.shared.accelerationFactor); self?.onChange?()
+        }, for: .valueChanged)
+        pages[3].addArrangedSubview(accelerationLabel); pages[3].addArrangedSubview(acceleration)
+        pages[3].addArrangedSubview(toggle("Помощь при старте", key: "launchAssist"))
+        pages[3].addArrangedSubview(button("Launch Control", "launchActivate"))
+        pages[3].addArrangedSubview(button("Подброс автомобиля", "hydraulicHop"))
+        pages[3].addArrangedSubview(button("Изменить цвет автомобиля", "vehicleColor"))
+        pages[3].addArrangedSubview(toggle("Стробоскоп фар", key: "vehicleStrobe"))
+        pages[3].addArrangedSubview(note("Разовый импульс скорости · 1–3"))
         let boost = UISlider(); boost.minimumValue = 1; boost.maximumValue = 3; boost.value = Float(MenuPreferences.shared.boostPower)
         boost.accessibilityLabel = "Сила ускорения транспорта"
         boost.addAction(UIAction { [weak boost] _ in MenuPreferences.shared.boostPower = Double(boost?.value ?? 1.5) }, for: .valueChanged)
@@ -1198,6 +1282,8 @@ private final class MenuController: UIViewController {
         pages[4].addArrangedSubview(toggle("Защита от падения", key: "noFall"))
         pages[4].addArrangedSubview(button("Восстановить HP", "heal"))
         pages[4].addArrangedSubview(button("Восстановить броню", "armor"))
+        pages[4].addArrangedSubview(toggle("Автоаптечка · команда сервера", key: "autoMedicine"))
+        pages[4].addArrangedSubview(button("Настроить автоаптечку", "medicineSettings"))
         pages[4].addArrangedSubview(toggle("Автовосстановление HP", key: "autoHealth"))
         pages[4].addArrangedSubview(toggle("Автовосстановление брони", key: "autoArmor"))
         pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
@@ -1525,4 +1611,5 @@ private final class ReactShotAudio {
         return data
     }
 }
+
 

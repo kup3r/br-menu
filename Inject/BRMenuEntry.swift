@@ -63,6 +63,7 @@ public final class BRMenuEntry: NSObject {
         guard licenseAllowed else { licenseGate.present(in: scene); return }
         #endif
         let menu = DiagnosticMenu()
+        menu.medicineConfigurationProvider = { command, threshold, interval, enabled in BRPlayerSnapshot.configureMedicine(command, threshold: threshold, interval: interval, enabled: enabled) }
         menu.clearNativeChatProvider = { BRPlayerSnapshot.clearNativeChat() }
         menu.visualTickProvider = { BRPlayerSnapshot.tickVisuals() }
         menu.clearChatControllerProvider = { BRPlayerSnapshot.clearChat(forController: $0) }
@@ -96,4 +97,5 @@ public final class BRMenuEntry: NSObject {
         menus.removeValue(forKey: scene.session.persistentIdentifier)?.uninstall()
     }
 }
+
 

@@ -11,6 +11,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules NS_SWIFT_NAME(configureChatAliases(_:));
 + (NSString *)sendChatCommand:(NSString *)command NS_SWIFT_NAME(sendChatCommand(_:));
 + (uint64_t)ownShotCount;
++ (void)configureMedicine:(NSString *)command threshold:(double)threshold interval:(double)interval enabled:(BOOL)enabled NS_SWIFT_NAME(configureMedicine(_:threshold:interval:enabled:));
 + (void)tickVisuals;
 + (BOOL)clearNativeChat;
 + (NSString *)status;
@@ -22,4 +23,5 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)performAction:(NSString *)action values:(NSDictionary<NSString *, NSNumber *> *)values NS_SWIFT_NAME(perform(action:values:));
 @end
 NS_ASSUME_NONNULL_END
+
 

@@ -34,5 +34,33 @@ int main(){
     assert(std::abs(a30-a60)<0.00001&&std::abs(b30-b60)<0.00001);
     assert(!React21::cameraStep(0,0,0,0,0,1.0/60,0.2,a,b));
     assert(!React21::cameraStep(0,0,1,1,1,1.0/60,0,a,b));
+    // A changed aspect retains the same effective vertical framing.
+    constexpr double rad=3.14159265358979323846/180;
+    for(float degrees:{50.f,70.f,100.f,120.f})for(float scale:{1.f,1.2f,1.6f}) {
+        const double compensated=React22::stretchFOV(degrees,scale);
+        assert(std::abs(std::tan(compensated*rad/2)/scale-std::tan(degrees*rad/2))<0.000002);
+    }
+    assert(React22::stretchFOV(70,0)==70);
+    float vx=0,vy=0,afterVX=0;
+    for(int i=0;i<100;++i){
+        vx=afterVX+0.001f;assert(React22::acceleration(afterVX,0,vx,0,1,0,0.05,5,x,y));afterVX=vx+x;
+    }
+    assert(std::abs(afterVX-0.5f)<0.00001); // five times the native acceleration, no exponential feedback
+    assert(!React22::acceleration(.5f,0,.4f,0,1,0,.05,5,x,y)); // braking untouched
+    assert(!React22::acceleration(0,0,1,0,1,0,.05,5,x,y)); // correction/impact rejected
+    assert(!React22::acceleration(0,0,0,.01f,1,0,.05,5,x,y)); // lateral movement untouched
+    (void)vy;
+    uint32_t flags[]={0,2,1,1};int16_t parents[4]{};
+    assert(React22::boneParents(flags,4,parents));
+    assert(parents[0]==-1&&parents[1]==0&&parents[2]==1&&parents[3]==0);
+    uint32_t invalidFlags[]={1,0};assert(!React22::boneParents(invalidFlags,2,parents));
+    React22::Medicine medicine;
+    assert(medicine.due(100,10,20,35,15,true));
+    assert(!medicine.due(110,10,20,35,15,true));
+    assert(medicine.due(115,10,20,35,15,true));
+    assert(!medicine.due(130,10,100,35,15,true));
+    assert(!medicine.due(140,10,0,35,15,true));
+    assert(medicine.due(141,11,20,35,15,true));
     std::cout<<"FOV, clock packing, weather bounds and disabled fallbacks passed\n";
 }
+
