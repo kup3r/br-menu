@@ -657,7 +657,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoMedicine", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
+    static let controlKeys = ["autoMedicine", "vehicleHydraulics", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
@@ -1247,6 +1247,7 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(accelerationLabel); pages[3].addArrangedSubview(acceleration)
         pages[3].addArrangedSubview(toggle("Помощь при старте", key: "launchAssist"))
         pages[3].addArrangedSubview(button("Launch Control", "launchActivate"))
+        pages[3].addArrangedSubview(toggle("Гидравлика · штатное управление", key: "vehicleHydraulics"))
         pages[3].addArrangedSubview(button("Подброс автомобиля", "hydraulicHop"))
         pages[3].addArrangedSubview(button("Изменить цвет автомобиля", "vehicleColor"))
         pages[3].addArrangedSubview(toggle("Стробоскоп фар", key: "vehicleStrobe"))

@@ -83,7 +83,7 @@ struct Assists {
     bool health=false,armor=false,stamina=false,vehicleHealth=false,slowFall=false;
     bool noClip=false,proof=false,noFall=false,vehicleProof=false,ammo=false,magazine=false,rapid=false;
     bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false,runSpeed=false;
-    bool vehicleAcceleration=false,launchAssist=false,strobe=false;
+    bool vehicleAcceleration=false,launchAssist=false,strobe=false,hydraulics=false;
     double fireRate=2,animationRate=2,runMultiplier=1.5,accelerationFactor=2;
 };
 Assists assists;
@@ -172,6 +172,20 @@ bool liveVehicle(const VehicleRef &v) {
         read(net,vehicle)&&vehicle==v.vehicle&&read(vehicle+0x174,generation)&&generation==v.generation;
 }
 
+struct Hydraulic22 {VehicleRef ref{};uint8_t original=0;bool active=false;};
+Hydraulic22 hydraulic22;
+void restoreHydraulics22() {
+    if(hydraulic22.active&&liveVehicle(hydraulic22.ref)) {
+        uint8_t current=0;uint64_t lines=0;
+        if(read(hydraulic22.ref.vehicle+0x570,current)&&current==1) {
+            if(!hydraulic22.original&&read(hydraulic22.ref.vehicle+0xae8,lines)&&lines&&anchorAt(hydraulic22.ref.base,0xacea68,0xd100c3ffU)) {
+                using Reset=void(*)(void *);reinterpret_cast<Reset>(hydraulic22.ref.base+0xacea68)(reinterpret_cast<void *>(hydraulic22.ref.vehicle));
+            }
+            (void)writeData(hydraulic22.ref.vehicle+0x570,hydraulic22.original);
+        }
+    }
+    hydraulic22={};
+}
 struct CarTrack22 {VehicleRef ref{};uint64_t ped=0;V3 after{};double time=0;};
 CarTrack22 carTrack22;
 struct Strobe22 {VehicleRef ref{};uint8_t original=0;bool active=false,last=false;double next=0;};
@@ -186,7 +200,14 @@ void updateCar22(const Local &s,double elapsed,bool alive) {
     uint64_t driver=0;uint32_t kind=99;VehicleRef ref{};
     const bool driving=alive&&s.vehicle&&read(s.vehicle+0x2f0,driver)&&driver==s.ped&&read(s.vehicle+0x430,kind)&&kind==0&&vehicleRef(s.base,s.vehicle,ref)&&sameLocal(s);
     if(strobe22.active&&(!assists.strobe||!driving||strobe22.ref.vehicle!=s.vehicle||!liveVehicle(strobe22.ref)))restoreStrobe22();
+    if(hydraulic22.active&&(!assists.hydraulics||!driving||hydraulic22.ref.vehicle!=s.vehicle||!liveVehicle(hydraulic22.ref)))restoreHydraulics22();
     if(!driving){carTrack22={};return;}
+    if(assists.hydraulics&&!hydraulic22.active&&anchorAt(s.base,0xac1660,0x3955c268U)&&anchorAt(s.base,0xacea68,0xd100c3ffU)) {
+        uint8_t enabled=0;uint64_t lines=0,model=0;
+        if(read(s.vehicle+0x570,enabled)&&enabled<=1&&read(s.vehicle+0xae8,lines)&&lines&&read(s.vehicle+0x728,model)&&model) {
+            hydraulic22={ref,enabled,true};const uint8_t one=1;(void)writeData(s.vehicle+0x570,one);
+        }
+    }
     const double now=NSProcessInfo.processInfo.systemUptime;
     if(assists.strobe&&anchorAt(s.base,0x944828,0xa9be4ff4U)) {
         // The local network presentation stores the light state as an optional bool.
@@ -1172,7 +1193,7 @@ void moveCamera21(const AimActor &target,double now) {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};restoreStrobe22();carTrack22={};rapid22={};collectSkeleton22.store(false);
+        const Flight old=flight;flight={};restoreStrobe22();restoreHydraulics22();carTrack22={};rapid22={};collectSkeleton22.store(false);
         medicineEnabled22=false;medicine22={};{std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={};}
         assists={};runTrack={};displayBalance21.store(-1);updateDisplayBalance21();regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
@@ -1224,7 +1245,8 @@ void moveCamera21(const AimActor &target,double now) {
         desiredWeather.store(extended&&settings[@"worldWeatherOverride"].boolValue?std::clamp(weather,0,21):-1);
         automaticAliases.store(extended&&settings[@"aliasesAuto"].boolValue);
         collectSkeleton22.store(settings[@"espSkeleton"].boolValue||settings[@"espSilhouette"].boolValue);
-        assists.vehicleAcceleration=settings[@"vehicleAcceleration"].boolValue;assists.launchAssist=settings[@"launchAssist"].boolValue;assists.strobe=settings[@"vehicleStrobe"].boolValue;
+        assists.vehicleAcceleration=settings[@"vehicleAcceleration"].boolValue;assists.launchAssist=settings[@"launchAssist"].boolValue;assists.strobe=settings[@"vehicleStrobe"].boolValue;assists.hydraulics=settings[@"vehicleHydraulics"].boolValue;
+        if(!assists.hydraulics)restoreHydraulics22();
         const double acceleration=settings[@"accelerationFactor"].doubleValue;assists.accelerationFactor=std::isfinite(acceleration)?std::clamp(acceleration,1.0,5.0):2;
         if(!assists.strobe)restoreStrobe22();
         assists.health=settings[@"autoHealth"].boolValue;assists.armor=settings[@"autoArmor"].boolValue;
@@ -1258,7 +1280,7 @@ void moveCamera21(const AimActor &target,double now) {
         tickWaypoint();
         tickAimContext();
         if(!flight.active&&!assists.health&&!assists.armor&&!assists.stamina&&!assists.vehicleHealth&&!assists.slowFall&&
-           !assists.vehicleAcceleration&&!assists.launchAssist&&!assists.strobe&&!strobe22.active&&!assists.runSpeed&&!assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
+           !assists.vehicleAcceleration&&!assists.launchAssist&&!assists.strobe&&!assists.hydraulics&&!hydraulic22.active&&!strobe22.active&&!assists.runSpeed&&!assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
         Local s;
         if(!std::isfinite(elapsed)||elapsed<=0||elapsed>0.25||!getLocal(s)) {flight={};return;}
         updatePedFlags(s);updateVehicleGuard(s);weaponAssists(s);updateSpread(s);updateAnimations(s);
