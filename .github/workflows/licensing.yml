@@ -7,10 +7,12 @@ on:
       - 'Sources/DiagnosticMenu/**'
       - 'Inject/BRMenuEntry.swift'
       - 'Inject/PlayerSnapshot.*'
+      - 'Inject/*24*'
       - 'Inject/ReactPolicies.hpp'
       - 'scripts/*client19*'
       - 'scripts/*client20*'
       - 'scripts/*client21*'
+      - 'scripts/*24*'
       - 'scripts/react_policy_tests.cpp'
       - 'scripts/command_alias_tests.swift'
       - 'scripts/build_dylib.sh'
@@ -74,10 +76,13 @@ jobs:
           python3 scripts/check_client19.py
           python3 scripts/check_client20.py
           python3 scripts/check_client21.py
+          python3 scripts/check_client24.py
+          CXX=clang++ python3 scripts/visual_controls24_tests.py
           python3 -m venv /tmp/react-adapter-tests
           /tmp/react-adapter-tests/bin/pip install unicorn==2.1.4
           /tmp/react-adapter-tests/bin/python scripts/test_client20_adapters.py
           /tmp/react-adapter-tests/bin/python scripts/test_client21_adapters.py
+          /tmp/react-adapter-tests/bin/python scripts/test_client24_adapter.py
       - name: Test command expansion and argument preservation
         run: |
           swiftc Sources/DiagnosticMenu/ReactCommands.swift scripts/command_alias_tests.swift -o /tmp/react-command-tests
@@ -97,6 +102,7 @@ jobs:
             dist/BRMenuInject.dylib
             dist/BRMenuInject-SHA256.txt
           retention-days: 7
+
 
 
 

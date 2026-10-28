@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Replace the existing embedded menu in a NEW unsigned IPA; copy other ZIP records.
 
-No executable is run. Input IPA and game modules remain byte-for-byte unchanged.
+No executable is run. Input IPA remains unchanged; --client24 also replaces the
+validated client with the default-pass water gate.
 """
 from pathlib import Path
 import argparse, copy, hashlib, json, shutil, struct, zipfile
 
 MENU = 'Payload/BrBase.app/Frameworks/BRMenuInject.dylib'
+CLIENT = 'Payload/BrBase.app/Frameworks/blackrussia-client.framework/blackrussia-client'
 def digest(path):
     with open(path, 'rb') as handle: return hashlib.file_digest(handle, 'sha256').hexdigest()
 
-def package(source, menu, destination):
+def package(source, menu, destination, client24=False):
     if destination.exists() or destination.resolve() == source.resolve():
         raise ValueError('Choose a new output path')
     before = digest(source); library = menu.read_bytes()
@@ -26,14 +28,19 @@ def package(source, menu, destination):
         main = original.read('Payload/BrBase.app/BrBase')
         if b'@executable_path/Frameworks/BRMenuInject.dylib\0' not in main:
             raise ValueError('Missing pre-existing menu dependency')
+        replacements={MENU:library}
+        if client24:
+            from patch_client24 import patch
+            if b'BRMenuWater24\0' not in library: raise ValueError('Missing water gate export')
+            replacements[CLIENT]=patch(original.read(CLIENT))
         # Keep every unchanged local ZIP record, including compression and descriptors.
         ordered = sorted(items, key=lambda x: x.header_offset)
         with zipfile.ZipFile(destination, 'w', allowZip64=True) as output:
             output.comment = original.comment
             for index, item in enumerate(ordered):
                 record = copy.copy(item)
-                if item.filename == MENU:
-                    output.writestr(record, library)
+                if item.filename in replacements:
+                    output.writestr(record, replacements[item.filename])
                     continue
                 end = ordered[index+1].header_offset if index+1 < len(ordered) else original.start_dir
                 raw.seek(item.header_offset)
@@ -53,7 +60,7 @@ def package(source, menu, destination):
         changed = []
         for name in original.namelist():
             if hashlib.sha256(original.read(name)).digest() != hashlib.sha256(output.read(name)).digest(): changed.append(name)
-        if changed != [MENU]: raise ValueError('Unexpected changed members: '+repr(changed))
+        if set(changed) != set(replacements): raise ValueError('Unexpected changed members: '+repr(changed))
     if digest(source) != before: raise ValueError('Source unexpectedly changed')
     return dict(output=str(destination), size_bytes=destination.stat().st_size, sha256=digest(destination),
                 source_sha256=before, changed_members=changed, menu_embedded=True,
@@ -61,4 +68,6 @@ def package(source, menu, destination):
 
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(); parser.add_argument('source',type=Path);parser.add_argument('menu',type=Path);parser.add_argument('destination',type=Path)
-    args=parser.parse_args();print(json.dumps(package(args.source,args.menu,args.destination),ensure_ascii=False,indent=2))
+    parser.add_argument('--client24',action='store_true')
+    args=parser.parse_args();print(json.dumps(package(args.source,args.menu,args.destination,args.client24),ensure_ascii=False,indent=2))
+

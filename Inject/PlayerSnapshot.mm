@@ -1,5 +1,7 @@
 #import "PlayerSnapshot.h"
 #import <objc/runtime.h>
+#import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES2/gl.h>
 #import <dispatch/dispatch.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
@@ -857,6 +859,9 @@ bool liveConnected(Local &s) {
     return getLocal(s)&&read(s.base+0x340de10,state)&&state==14&&read(s.ped+0x4b0,hp)&&
         read(s.ped+0x494,pedState)&&BRAim::living(hp,hp,pedState)&&sameLocal(s);
 }
+#include "Chams24.inc"
+#include "Water24.inc"
+#include "Damage24.inc"
 using FireInput=int32_t(*)(void *);
 int32_t triggerInput(void *pad,FireInput original,bool pressed) noexcept {
     if(!original)return 0;
@@ -989,6 +994,7 @@ void BRMenuImpact21(void *weapon,void *owner,void *victim,const V3 *from,const V
             if(distance>1&&distance<1000){std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={s.ped,s.local,s.base,s.id,point,NSProcessInfo.processInfo.systemUptime};}
         }
     }
+    DamageScope24 damageScope(owner,victim,weapon);
     const bool before=ownImpact21;ownImpact21=false;
     if(customHitEnabled.load()){@autoreleasepool {Local s;ownImpact21=liveConnected(s)&&reinterpret_cast<uint64_t>(owner)==s.ped&&victim;}}
     original(weapon,owner,victim,from,to,collision,damage);ownImpact21=before;
@@ -1003,6 +1009,8 @@ uint32_t BRMenuSound21(uint64_t,uint64_t entity,uint64_t event,uint64_t,uint64_t
     }
     return 1;
 }
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuWater24(uint64_t ped) noexcept {return waterDecision24(ped);}
 extern "C" __attribute__((used,visibility("default")))
 uint32_t BRMenuLogo21() noexcept {return hideLogoEnabled.load()?0:1;}
 extern "C" __attribute__((used,visibility("default")))
@@ -1199,6 +1207,7 @@ void moveCamera21(const AimActor &target,double now) {
 
 + (void)stopControls {
     @synchronized(self) {
+        stopChams24();waterWalk24.store(false);damageFactor24.store(1);
         const Flight old=flight;flight={};restoreStrobe22();restoreHydraulics22();carTrack22={};rapid22={};collectSkeleton22.store(false);
         medicineEnabled22=false;medicine22={};{std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={};}
         assists={};runTrack={};displayBalance21.store(-1);updateDisplayBalance21();regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
@@ -1215,6 +1224,13 @@ void moveCamera21(const AimActor &target,double now) {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
         const bool extended=extensionBridgeReady(imageBase());
+        waterWalk24.store(settings[@"waterWalk"].boolValue&&waterBridge24(imageBase()));
+        const double damage=settings[@"damageFactor"].doubleValue;damageFactor24.store(settings[@"extraDamage"].boolValue&&std::isfinite(damage)?std::clamp(damage,1.0,5.0):1);
+        chamsWalls24.store(settings[@"chamsWalls"].boolValue);
+        chamsDistance24=std::clamp(settings[@"chamsDistance"].doubleValue,25.0,500.0);
+        uint32_t red=uint32_t(std::clamp(settings[@"chamsRed"].intValue,0,255)),green=uint32_t(std::clamp(settings[@"chamsGreen"].intValue,0,255)),blue=uint32_t(std::clamp(settings[@"chamsBlue"].intValue,0,255));
+        chamsColor24.store(red|(green<<8)|(blue<<16)|0xff000000U);
+        if(settings[@"chams"].boolValue)chamsEnabled24.store(true);else stopChams24();
         regularAimEnabled.store(extended&&settings[@"regularAim"].boolValue);
         const double smooth=settings[@"aimSmooth"].doubleValue;
         aimSmoothSeconds.store(std::isfinite(smooth)?std::clamp(smooth,0.02,1.0):0.2);
@@ -1269,7 +1285,7 @@ void moveCamera21(const AimActor &target,double now) {
         const double animationRate=settings[@"animationRate"].doubleValue;
         assists.animationRate=std::isfinite(animationRate)?std::clamp(animationRate,1.0,4.0):2;
         assists.magazine=settings[@"noReload"].boolValue;assists.rapid=settings[@"rapidFire"].boolValue;
-        const double rate=settings[@"fireRate"].doubleValue;assists.fireRate=std::isfinite(rate)?std::clamp(rate,1.0,5.0):2.0;
+        const double rate=settings[@"fireRate"].doubleValue;assists.fireRate=std::isfinite(rate)?std::clamp(rate,1.0,15.0):2.0;
         Local s;if(getLocal(s)){updatePedFlags(s);updateVehicleGuard(s);updateSpread(s);updateAnimations(s);}else if(!assists.noSpread)restoreSpread();
     }
 }
@@ -1282,6 +1298,7 @@ void moveCamera21(const AimActor &target,double now) {
             if(medicine22.due(NSProcessInfo.processInfo.systemUptime,valid?local.ped:0,hp,medicineThreshold22,medicineInterval22,valid))
                 (void)[self sendChatCommand:medicineCommand22];
         }
+        tickChams24();
         tickModels();
         tickWaypoint();
         tickAimContext();
@@ -1349,7 +1366,7 @@ void moveCamera21(const AimActor &target,double now) {
         uint16_t carID=0;if(s.vehicle)(void)read(s.vehicle+0x434,carID);
         uint32_t lifeState=0,connection=0;(void)read(s.ped+0x494,lifeState);(void)read(s.base+0x340de10,connection);
         uint32_t skin=0,carModel=0;(void)read(s.ped+0x98,skin);if(s.vehicle)(void)read(s.vehicle+0x98,carModel);
-        return @{@"connected":@(connection==14),@"alive":@(BRAim::living(health,health,lifeState)),@"owner":@(s.ped),@"modelStatus":modelStatus,@"skin":@(skin),@"carModel":@(carModel),@"modelPending":@(modelPending.action!=ModelAction::None),@"weapon":@(hasWeapon?int(weapon.id):-1),@"clip":@(hasWeapon?weapon.clip:-1),@"ammo":@(hasWeapon?weapon.total:-1),
+        return @{@"waterBridge":@(waterBridge24(s.base)),@"chamsActive":@(chamsActive24.load()),@"chamsDraws":@(chamsDraws24.load()),@"connected":@(connection==14),@"alive":@(BRAim::living(health,health,lifeState)),@"owner":@(s.ped),@"modelStatus":modelStatus,@"skin":@(skin),@"carModel":@(carModel),@"modelPending":@(modelPending.action!=ModelAction::None),@"weapon":@(hasWeapon?int(weapon.id):-1),@"clip":@(hasWeapon?weapon.clip:-1),@"ammo":@(hasWeapon?weapon.total:-1),
             @"capacity":@(hasWeapon?int(weapon.capacity):-1),@"carID":@(s.vehicle?int(carID):-1),@"gravity":@(std::isfinite(gravity)?gravity:0),
             @"vehicleProtected":@(vehicleGuard.active),@"flightActive":@(flight.active),@"id":@(s.id),@"x":@(s.position.x),@"y":@(s.position.y),@"z":@(s.position.z),
             @"hp":@(std::isfinite(health)?health:-1),@"armor":@(std::isfinite(armor)?armor:-1),
@@ -1385,6 +1402,19 @@ void moveCamera21(const AimActor &target,double now) {
         Local s;if(!getLocal(s))return @"Персонаж не найден или сборка клиента не совпадает";
         if(waypointJob.active)return @"Дождись телепорта по метке или отмени его";
         if([action isEqualToString:@"waypoint"]) {lastAction=now;return beginWaypoint(s);}
+        if([action isEqualToString:@"land"]) {
+            if(s.vehicle)return @"Для возврата на землю выйди из транспорта";
+            float hp=0;uint32_t life=0;uint8_t found=0;
+            if(!read(s.ped+0x4b0,hp)||!read(s.ped+0x494,life)||!BRAim::living(hp,hp,life)||!anchorAt(s.base,0x11f89c,0xd10203ffU))return @"Персонаж ещё не готов";
+            using Ground=float(*)(float,float,float,uint8_t *);
+            const float height=reinterpret_cast<Ground>(s.base+0x11f89c)(s.position.x,s.position.y,std::min(4999.f,s.position.z+0.5f),&found);
+            if(found!=1||!std::isfinite(height)||height<-500||height>s.position.z+0.5f)return @"Поверхность снизу ещё не загружена";
+            V3 point{s.position.x,s.position.y,height+1.f};if(!destination(point))return @"Поверхность вне допустимых границ";
+            const Flight previous=flight;flight={};updatePedFlags(s);
+            NSString *result=teleport(s,point);
+            if(![result isEqualToString:@"Локальная команда телепорта выполнена"]){flight=previous;updatePedFlags(s);return result;}
+            const V3 zero{};(void)writeData(s.ped+0x180,zero);lastAction=now;return @"Персонаж возвращён на поверхность";
+        }
         if([action isEqualToString:@"flightToggle"]) {
             if(flight.active) {
                 const Flight old=flight;flight={};
@@ -1603,6 +1633,14 @@ void moveCamera21(const AimActor &target,double now) {
             if(!sameLocal(s)||!writeData(s.ped+0x188,vertical))return @"Не удалось задать прыжок";
             lastAction=now;return @"Задан вертикальный импульс";
         }
+        if([action isEqualToString:@"launchUp"]||[action isEqualToString:@"launchDown"]) {
+            if(s.vehicle)return @"Для подброса выйди из транспорта";
+            const double power=values[@"power"].doubleValue;float hp=0;uint32_t life=0;
+            if(!std::isfinite(power)||power<1||power>5||!read(s.ped+0x4b0,hp)||!read(s.ped+0x494,life)||!BRAim::living(hp,hp,life)||!sameLocal(s))return @"Персонаж ещё не готов";
+            const float vertical=float(([action isEqualToString:@"launchUp"]?1:-1)*0.18*power);
+            if(!writeData(s.ped+0x188,vertical))return @"Не удалось изменить вертикальную скорость";
+            lastAction=now;return [action isEqualToString:@"launchUp"]?@"Подброс вверх выполнен":@"Импульс вниз выполнен";
+        }
         if([action isEqualToString:@"massPed"]||[action isEqualToString:@"massVehicle"]||[action isEqualToString:@"massReset"]) {
             if([action isEqualToString:@"massReset"]) {
                 bool a=restoreMass(s,pedMass,s.ped),b=restoreMass(s,vehicleMass,s.vehicle);
@@ -1801,5 +1839,6 @@ void moveCamera21(const AimActor &target,double now) {
     }
 }
 @end
+
 
 

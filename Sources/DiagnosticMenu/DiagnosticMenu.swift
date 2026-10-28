@@ -421,7 +421,8 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
             for key in MenuPreferences.controlKeys { MenuPreferences.shared.set(key, false) }
             controlStopProvider?(); host.syncControlToggles(); configureControls()
             host.actionStatus.text = "Игровые переключатели выключены"; append("Игровые переключатели выключены")
-        case "hop": runGame("hop", ["power": MenuPreferences.shared.hopPower])
+        case "hop", "launchUp", "launchDown": runGame(action, ["power": MenuPreferences.shared.hopPower])
+        case "land": runGame(action, [:])
         case "suicide":
             for key in ["autoHealth", "localProof", "noFall", "noAnim", "fastAnim"] { MenuPreferences.shared.set(key, false) }
             host.syncControlToggles(); configureControls(); runGame(action, [:])
@@ -466,6 +467,12 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         values["espSkeleton"] = MenuPreferences.shared.flag("espSkeleton") ? 1 : 0
         values["espSilhouette"] = MenuPreferences.shared.flag("espSilhouette") ? 1 : 0
         medicineConfigurationProvider?(MenuPreferences.shared.medicineCommand, MenuPreferences.shared.medicineThreshold, MenuPreferences.shared.medicineInterval, MenuPreferences.shared.flag("autoMedicine"))
+        values["chamsWalls"] = MenuPreferences.shared.flag("chamsWalls", fallback: true) ? 1 : 0
+        values["chamsDistance"] = MenuPreferences.shared.maxDistance
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        MenuPreferences.shared.accent.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        values["chamsRed"] = Double(red * 255); values["chamsGreen"] = Double(green * 255); values["chamsBlue"] = Double(blue * 255)
+        values["damageFactor"] = MenuPreferences.shared.damageFactor
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
         values["runMultiplier"] = MenuPreferences.shared.runMultiplier
@@ -657,7 +664,7 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoMedicine", "vehicleHydraulics", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
+    static let controlKeys = ["chams", "waterWalk", "extraDamage", "autoMedicine", "vehicleHydraulics", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
@@ -717,8 +724,12 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "animationRate") == nil ? 2 : max(1, min(4, defaults.double(forKey: "animationRate"))) }
         set { defaults.set(newValue, forKey: "animationRate") }
     }
+    var damageFactor: Double {
+        get { defaults.object(forKey: "damageFactor") == nil ? 2 : max(1, min(5, defaults.double(forKey: "damageFactor"))) }
+        set { defaults.set(newValue, forKey: "damageFactor") }
+    }
     var fireRate: Double {
-        get { defaults.object(forKey: "fireRate") == nil ? 2 : max(1, min(5, defaults.double(forKey: "fireRate"))) }
+        get { defaults.object(forKey: "fireRate") == nil ? 2 : max(1, min(15, defaults.double(forKey: "fireRate"))) }
         set { defaults.set(newValue, forKey: "fireRate") }
     }
     var gravityFactor: Double {
@@ -1152,6 +1163,8 @@ private final class MenuController: UIViewController {
         pages[1].addArrangedSubview(toggle("Боксы", key: "espBox", fallback: true))
         pages[1].addArrangedSubview(toggle("Скелет · реальные кости", key: "espSkeleton"))
         pages[1].addArrangedSubview(toggle("Силуэт по костям", key: "espSilhouette"))
+        pages[1].addArrangedSubview(toggle("Чамсы · заливка модели", key: "chams"))
+        pages[1].addArrangedSubview(toggle("Чамсы за стенами", key: "chamsWalls", fallback: true))
         pages[1].addArrangedSubview(toggle("Ник и ID", key: "espName", fallback: true))
         pages[1].addArrangedSubview(toggle("HP и полоса здоровья", key: "espHP", fallback: true))
         pages[1].addArrangedSubview(toggle("Броня", key: "espArmor"))
@@ -1208,6 +1221,10 @@ private final class MenuController: UIViewController {
         hop.addAction(UIAction { [weak hop] _ in MenuPreferences.shared.hopPower = Double(hop?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(hop)
         pages[2].addArrangedSubview(button("Высокий прыжок", "hop"))
+        pages[2].addArrangedSubview(button("Подкинуть вверх", "launchUp"))
+        pages[2].addArrangedSubview(button("Подкинуть вниз", "launchDown"))
+        pages[2].addArrangedSubview(button("Вернуться на землю", "land"))
+        pages[2].addArrangedSubview(toggle("Ходьба под водой", key: "waterWalk"))
         pages[2].addArrangedSubview(button("Рывок вперёд · та же сила 1–5", "dash"))
         pages[2].addArrangedSubview(toggle("Мягкое падение", key: "slowFall"))
         pages[2].addArrangedSubview(note("Множитель массы · 0.1–5"))
@@ -1306,10 +1323,20 @@ private final class MenuController: UIViewController {
         pages[5].addArrangedSubview(toggle("Без перезарядки", key: "noReload"))
         pages[5].addArrangedSubview(toggle("Rapid Fire · скорострельность", key: "rapidFire"))
         let rateLabel = note(String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate)); pages[5].addArrangedSubview(rateLabel)
-        let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 5; fireRate.value = Float(MenuPreferences.shared.fireRate)
+        let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 15; fireRate.value = Float(MenuPreferences.shared.fireRate)
         fireRate.accessibilityLabel = "Множитель скорострельности"
         fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
+        pages[5].addArrangedSubview(toggle("Увеличенный урон · экспериментальный", key: "extraDamage"))
+        pages[5].addArrangedSubview(note("Сервер может ограничивать множитель урона."))
+        let damageLabel = note(String(format: "Множитель урона: ×%.1f", MenuPreferences.shared.damageFactor))
+        let damage = UISlider(); damage.minimumValue = 1; damage.maximumValue = 5; damage.value = Float(MenuPreferences.shared.damageFactor)
+        damage.accessibilityLabel = "Множитель урона"
+        damage.addAction(UIAction { [weak self, weak damage] _ in
+            MenuPreferences.shared.damageFactor = Double(damage?.value ?? 2)
+            damageLabel.text = String(format: "Множитель урона: ×%.1f", MenuPreferences.shared.damageFactor); self?.onChange?()
+        }, for: .valueChanged)
+        pages[5].addArrangedSubview(damageLabel); pages[5].addArrangedSubview(damage)
         pages[6].addArrangedSubview(toggle("Обычный Aim · поворот камеры", key: "regularAim"))
         pages[6].addArrangedSubview(toggle("Aim: проверять препятствия", key: "regularAimVisible", fallback: true))
         let smoothLabel = note(String(format: "Плавность Aim: %.0f мс", MenuPreferences.shared.aimSmooth * 1000))
@@ -1612,5 +1639,6 @@ private final class ReactShotAudio {
         return data
     }
 }
+
 
 
