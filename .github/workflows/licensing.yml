@@ -80,6 +80,7 @@ jobs:
           python3 scripts/check_client21.py
           python3 scripts/check_client24.py
           CXX=clang++ python3 scripts/visual_controls24_tests.py
+          CXX=clang++ python3 scripts/event25_buffer_tests.py
           python3 -m venv /tmp/react-adapter-tests
           /tmp/react-adapter-tests/bin/pip install unicorn==2.1.4
           /tmp/react-adapter-tests/bin/python scripts/test_client20_adapters.py
