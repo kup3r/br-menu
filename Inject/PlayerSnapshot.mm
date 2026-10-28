@@ -96,18 +96,24 @@ struct ImpactPoint22 {uint64_t ped=0,local=0,base=0;uint16_t id=0;V3 point{};dou
 std::mutex impactMutex22;ImpactPoint22 impactPoint22;
 struct Local { uint64_t base=0,pool=0,local=0,ped=0,vehicle=0; uint16_t id=0; V3 position{},velocity{}; };
 bool anchors(uint64_t base) {
-    uint32_t getter=0,position=0,velocity=0;
+    uint32_t getter=0,position=0,velocity=0,inVehicle=0;
     return read(base+0x92d4c8,getter)&&getter==0xf9401c00U&&
         read(base+0x9aabe8,position)&&position==0x2d07266aU&&
-        read(base+0x15349c,velocity)&&velocity==0xfd00c260U;
+        read(base+0x15349c,velocity)&&velocity==0xfd00c260U&&
+        read(base+0xf94e8,inVehicle)&&inVehicle==0x39552109U;
 }
 bool getLocal(Local &s) {
     s.base=imageBase();
     if(!s.base||!anchors(s.base))return false;
-    return read(s.base+0x340de18,s.pool)&&s.pool&&read(s.pool,s.local)&&s.local&&
+    uint64_t referencedVehicle=0;uint8_t inVehicle=0;
+    const bool valid=read(s.base+0x340de18,s.pool)&&s.pool&&read(s.pool,s.local)&&s.local&&
         read(s.local,s.id)&&s.id<1504&&read(s.local+0x38,s.ped)&&s.ped&&
         read(s.ped+0x38,s.position)&&finite(s.position)&&
-        read(s.ped+0x180,s.velocity)&&finite(s.velocity)&&read(s.ped+0x540,s.vehicle);
+        read(s.ped+0x180,s.velocity)&&finite(s.velocity)&&read(s.ped+0x540,referencedVehicle)&&read(s.ped+0x548,inVehicle);
+    // FindPlayerVehicle (f94e8..f94f4) checks this exact flag before returning
+    // +540. The ped can retain the last vehicle reference after dismounting.
+    s.vehicle=valid&&inVehicle==1?referencedVehicle:0;
+    return valid;
 }
 bool sameLocal(const Local &s) {
     uint64_t pool=0,local=0,ped=0;uint16_t id=0;
