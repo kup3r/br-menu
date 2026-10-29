@@ -244,8 +244,8 @@ public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocu
         let area = CGRect(x: insets.left + 12, y: topInset + 12,
                           width: max(58, bounds.width - insets.left - insets.right - 24),
                           height: max(58, bounds.height - topInset - insets.bottom - 24))
-        let width = host.collapsed ? 58.0 : min(MenuPreferences.shared.large ? 380.0 : 300.0, area.width)
-        let height = host.collapsed ? 58.0 : min(MenuPreferences.shared.large ? 500.0 : 440.0, area.height)
+        let width = host.collapsed ? 58.0 : min(MenuPreferences.shared.large ? 420.0 : 350.0, area.width)
+        let height = host.collapsed ? 58.0 : min(520.0, area.height)
         let defaultX = host.rightSide ? area.maxX - width : area.minX
         let desired = dragOrigin ?? CGPoint(x: defaultX, y: area.minY)
         let x = min(max(area.minX, desired.x), area.maxX - width)
@@ -1088,6 +1088,8 @@ private final class MenuController: UIViewController {
     private var selectedPage: Int? = nil
     private let categoryTitles = ["Диагностика", "ESP и визуалы", "Движение", "Транспорт", "Персонаж", "Оружие", "Silent Aim", "Настройки"]
     private let pages = (0..<8).map { _ in UIStackView() }
+    private var disclosures26: [(UIButton, UIStackView, String)] = []
+    private var sections26: [(UIButton, UIStackView, String)] = []
     private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     var messages: [String] = []
     var collapsed = false, rightSide = true
@@ -1214,6 +1216,7 @@ private final class MenuController: UIViewController {
             runLabel.text = String(format: "Скорость бега: ×%.1f", MenuPreferences.shared.runMultiplier); self?.onChange?()
         }, for: .valueChanged)
         pages[2].addArrangedSubview(runLabel); pages[2].addArrangedSubview(runSpeed)
+        flightStatus.accessibilityIdentifier = "diagnostics.flightStatus"
         flightStatus.text = "AirBrake выключен"; flightStatus.font = .systemFont(ofSize: 11); flightStatus.textColor = .systemOrange
         pages[2].addArrangedSubview(flightStatus)
         pages[2].addArrangedSubview(toggle("No Collision · без столкновений", key: "noCollision"))
@@ -1228,53 +1231,53 @@ private final class MenuController: UIViewController {
             for (title, action) in directions { row.addArrangedSubview(holdButton(title, action)) }
             pages[2].addArrangedSubview(row)
         }
-        pages[2].addArrangedSubview(button("Телепорт по метке на карте", "waypoint"))
-        pages[2].addArrangedSubview(button("Отменить телепорт по метке", "waypointCancel"))
-        pages[2].addArrangedSubview(button("Телепорт по XYZ", "teleportXYZ"))
-        pages[2].addArrangedSubview(button("К последнему месту попадания", "teleportImpact"))
-        pages[2].addArrangedSubview(button("К загруженному игроку по ID", "teleportPlayer"))
-        pages[2].addArrangedSubview(button("К транспорту по ID", "teleportVehicle"))
-        pages[2].addArrangedSubview(button("К ближайшему загруженному авто", "nearestVehicle"))
-        pages[2].addArrangedSubview(button("Сохранить текущую точку", "savePoint"))
-        pages[2].addArrangedSubview(button("Вернуться в сохранённую точку", "returnPoint"))
-        pages[2].addArrangedSubview(note("Сила прыжка · 1–5"))
+        pages[2].addArrangedSubview(button("По метке", "waypoint"))
+        pages[2].addArrangedSubview(button("Отменить", "waypointCancel"))
+        pages[2].addArrangedSubview(button("По XYZ", "teleportXYZ"))
+        pages[2].addArrangedSubview(button("К попаданию", "teleportImpact"))
+        pages[2].addArrangedSubview(button("К игроку", "teleportPlayer"))
+        pages[2].addArrangedSubview(button("К авто по ID", "teleportVehicle"))
+        pages[2].addArrangedSubview(button("Ближайшее авто", "nearestVehicle"))
+        pages[2].addArrangedSubview(button("Сохранить точку", "savePoint"))
+        pages[2].addArrangedSubview(button("Вернуться", "returnPoint"))
+        let hopHeading = note("Сила прыжка · 1–5"); hopHeading.accessibilityIdentifier = "diagnostics.hopHeading"; pages[2].addArrangedSubview(hopHeading)
         let hop = UISlider(); hop.minimumValue = 1; hop.maximumValue = 5; hop.value = Float(MenuPreferences.shared.hopPower)
         hop.accessibilityLabel = "Сила прыжка"
         hop.addAction(UIAction { [weak hop] _ in MenuPreferences.shared.hopPower = Double(hop?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(hop)
-        pages[2].addArrangedSubview(button("Высокий прыжок", "hop"))
-        pages[2].addArrangedSubview(button("Подкинуть вверх", "launchUp"))
-        pages[2].addArrangedSubview(button("Подкинуть вниз", "launchDown"))
-        pages[2].addArrangedSubview(button("Вернуться на землю", "land"))
+        pages[2].addArrangedSubview(button("Прыжок", "hop"))
+        pages[2].addArrangedSubview(button("Вверх", "launchUp"))
+        pages[2].addArrangedSubview(button("Вниз", "launchDown"))
+        pages[2].addArrangedSubview(button("На землю", "land"))
         pages[2].addArrangedSubview(toggle("Ходьба под водой", key: "waterWalk"))
-        pages[2].addArrangedSubview(button("Рывок вперёд · та же сила 1–5", "dash"))
+        pages[2].addArrangedSubview(button("Рывок", "dash"))
         pages[2].addArrangedSubview(toggle("Мягкое падение", key: "slowFall"))
-        pages[2].addArrangedSubview(note("Множитель массы · 0.1–5"))
+        let massHeading = note("Множитель массы · 0.1–5"); massHeading.accessibilityIdentifier = "diagnostics.massHeading"; pages[2].addArrangedSubview(massHeading)
         let mass = UISlider(); mass.minimumValue = 0.1; mass.maximumValue = 5; mass.value = Float(MenuPreferences.shared.massFactor)
         mass.accessibilityLabel = "Множитель массы"
         mass.addAction(UIAction { [weak mass] _ in MenuPreferences.shared.massFactor = Double(mass?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(mass)
-        pages[2].addArrangedSubview(button("Применить массу к персонажу", "massPed"))
-        pages[2].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
+        pages[2].addArrangedSubview(button("Задать массу", "massPed"))
+        pages[2].addArrangedSubview(button("Сброс массы", "massReset"))
         pages[2].addArrangedSubview(note("Гравитация · множитель от −2 до 3"))
         let gravity = UISlider(); gravity.minimumValue = -2; gravity.maximumValue = 3; gravity.value = Float(MenuPreferences.shared.gravityFactor)
         gravity.accessibilityLabel = "Множитель гравитации"
         gravity.addAction(UIAction { [weak gravity] _ in MenuPreferences.shared.gravityFactor = Double(gravity?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(gravity)
-        pages[2].addArrangedSubview(button("Применить гравитацию к персонажу", "gravityPed"))
-        pages[2].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
+        pages[2].addArrangedSubview(button("Задать гравитацию", "gravityPed"))
+        pages[2].addArrangedSubview(button("Сброс гравитации", "gravityReset"))
         carStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); carStatus.textColor = .systemCyan; carStatus.numberOfLines = 0
         pages[3].addArrangedSubview(carStatus)
-        pages[3].addArrangedSubview(button("Bypass Lock · открыть ближайшую машину", "unlockVehicle"))
-        pages[3].addArrangedSubview(button("Drive Without Key · запустить двигатель", "startEngine"))
-        pages[3].addArrangedSubview(button("Подменить модель машины по ID", "carSet"))
-        pages[3].addArrangedSubview(button("Вернуть исходную модель машины", "carRestore"))
-        pages[3].addArrangedSubview(button("Остановить транспорт", "stopVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить HP авто", "healVehicle"))
-        pages[3].addArrangedSubview(button("Ремонт кузова", "repairVehicle"))
+        pages[3].addArrangedSubview(button("Открыть авто", "unlockVehicle"))
+        pages[3].addArrangedSubview(button("Запустить", "startEngine"))
+        pages[3].addArrangedSubview(button("Модель по ID", "carSet"))
+        pages[3].addArrangedSubview(button("Вернуть модель", "carRestore"))
+        pages[3].addArrangedSubview(button("Остановить", "stopVehicle"))
+        pages[3].addArrangedSubview(button("HP авто", "healVehicle"))
+        pages[3].addArrangedSubview(button("Ремонт", "repairVehicle"))
         pages[3].addArrangedSubview(toggle("Защита транспорта", key: "vehicleProof"))
         pages[3].addArrangedSubview(toggle("Автовосстановление HP авто", key: "autoVehicleHealth"))
-        pages[3].addArrangedSubview(button("Поставить на колёса", "flipVehicle"))
+        pages[3].addArrangedSubview(button("На колёса", "flipVehicle"))
         pages[3].addArrangedSubview(toggle("Постоянное ускорение", key: "vehicleAcceleration"))
         let accelerationLabel = note(String(format: "Множитель разгона: ×%.1f", MenuPreferences.shared.accelerationFactor))
         let acceleration = UISlider(); acceleration.minimumValue = 1; acceleration.maximumValue = 5; acceleration.value = Float(MenuPreferences.shared.accelerationFactor)
@@ -1287,23 +1290,23 @@ private final class MenuController: UIViewController {
         pages[3].addArrangedSubview(toggle("Помощь при старте", key: "launchAssist"))
         pages[3].addArrangedSubview(button("Launch Control", "launchActivate"))
         pages[3].addArrangedSubview(toggle("Гидравлика · штатное управление", key: "vehicleHydraulics"))
-        pages[3].addArrangedSubview(button("Подброс автомобиля", "hydraulicHop"))
-        pages[3].addArrangedSubview(button("Изменить цвет автомобиля", "vehicleColor"))
+        pages[3].addArrangedSubview(button("Подброс авто", "hydraulicHop"))
+        pages[3].addArrangedSubview(button("Цвет авто", "vehicleColor"))
         pages[3].addArrangedSubview(toggle("Стробоскоп фар", key: "vehicleStrobe"))
         pages[3].addArrangedSubview(note("Разовый импульс скорости · 1–3"))
         let boost = UISlider(); boost.minimumValue = 1; boost.maximumValue = 3; boost.value = Float(MenuPreferences.shared.boostPower)
         boost.accessibilityLabel = "Сила ускорения транспорта"
         boost.addAction(UIAction { [weak boost] _ in MenuPreferences.shared.boostPower = Double(boost?.value ?? 1.5) }, for: .valueChanged)
         pages[3].addArrangedSubview(boost)
-        pages[3].addArrangedSubview(button("Ускорить транспорт", "boostVehicle"))
-        pages[3].addArrangedSubview(button("Применить выбранную массу к авто", "massVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
-        pages[3].addArrangedSubview(button("Применить выбранную гравитацию к авто", "gravityVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
+        pages[3].addArrangedSubview(button("Импульс", "boostVehicle"))
+        pages[3].addArrangedSubview(button("Масса авто", "massVehicle"))
+        pages[3].addArrangedSubview(button("Сброс массы", "massReset"))
+        pages[3].addArrangedSubview(button("Гравитация авто", "gravityVehicle"))
+        pages[3].addArrangedSubview(button("Сброс гравитации", "gravityReset"))
         selfStatus.numberOfLines = 0; selfStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); selfStatus.textColor = .systemCyan
         pages[4].addArrangedSubview(selfStatus)
-        pages[4].addArrangedSubview(button("Suicide · завершить жизнь персонажа", "suicide"))
-        pages[4].addArrangedSubview(button("Fast Respawn · появиться снова", "respawn"))
+        pages[4].addArrangedSubview(button("Suicide", "suicide"))
+        pages[4].addArrangedSubview(button("Respawn", "respawn"))
         pages[4].addArrangedSubview(toggle("Антифриз / Anti-Tazer", key: "antiFreeze"))
         pages[4].addArrangedSubview(toggle("NoAnim · отключение анимаций", key: "noAnim"))
         pages[4].addArrangedSubview(toggle("Fast Anim · ускоренные анимации", key: "fastAnim"))
@@ -1315,15 +1318,15 @@ private final class MenuController: UIViewController {
             animationLabel.text = String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate); self?.onChange?()
         }, for: .valueChanged)
         pages[4].addArrangedSubview(animationLabel); pages[4].addArrangedSubview(animationRate)
-        pages[4].addArrangedSubview(button("Сменить скин по ID", "skinSet"))
-        pages[4].addArrangedSubview(button("Вернуть исходный скин", "skinRestore"))
-        pages[4].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
+        pages[4].addArrangedSubview(button("Скин по ID", "skinSet"))
+        pages[4].addArrangedSubview(button("Вернуть скин", "skinRestore"))
+        pages[4].addArrangedSubview(button("Выключить всё", "resetControls"))
         pages[4].addArrangedSubview(toggle("Защита от урона", key: "localProof"))
         pages[4].addArrangedSubview(toggle("Защита от падения", key: "noFall"))
-        pages[4].addArrangedSubview(button("Восстановить HP", "heal"))
-        pages[4].addArrangedSubview(button("Восстановить броню", "armor"))
+        pages[4].addArrangedSubview(button("Аптечка", "heal"))
+        pages[4].addArrangedSubview(button("Броня", "armor"))
         pages[4].addArrangedSubview(toggle("Автоаптечка · команда сервера", key: "autoMedicine"))
-        pages[4].addArrangedSubview(button("Настроить автоаптечку", "medicineSettings"))
+        pages[4].addArrangedSubview(button("Настроить", "medicineSettings"))
         pages[4].addArrangedSubview(toggle("Автовосстановление HP", key: "autoHealth"))
         pages[4].addArrangedSubview(toggle("Автовосстановление брони", key: "autoArmor"))
         pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
@@ -1331,18 +1334,18 @@ private final class MenuController: UIViewController {
         pages[5].addArrangedSubview(weaponStatus)
         pages[5].addArrangedSubview(toggle("Заменить звук выстрела", key: "customShotSound"))
         pages[5].addArrangedSubview(soundPicker(hit: false))
-        pages[5].addArrangedSubview(button("Прослушать звук", "shotPreview"))
-        pages[5].addArrangedSubview(button("Импортировать звук", "shotImport"))
-        pages[5].addArrangedSubview(button("Мягкий щелчок", "shotReset"))
+        pages[5].addArrangedSubview(button("Прослушать", "shotPreview"))
+        pages[5].addArrangedSubview(button("Импорт", "shotImport"))
+        pages[5].addArrangedSubview(button("Сброс звука", "shotReset"))
         pages[5].addArrangedSubview(toggle("Заменить звук попадания", key: "customHitSound"))
         pages[5].addArrangedSubview(soundPicker(hit: true))
-        pages[5].addArrangedSubview(button("Прослушать попадание", "hitPreview"))
-        pages[5].addArrangedSubview(button("Импортировать звук попадания", "hitImport"))
-        pages[5].addArrangedSubview(button("Стандартный звук попадания", "hitReset"))
+        pages[5].addArrangedSubview(button("Прослушать", "hitPreview"))
+        pages[5].addArrangedSubview(button("Импорт", "hitImport"))
+        pages[5].addArrangedSubview(button("Сброс звука", "hitReset"))
         pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
-        pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
-        pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
-        pages[5].addArrangedSubview(button("Заполнить магазин из запаса", "magazineFill"))
+        pages[5].addArrangedSubview(button("Оружие по ID", "weaponGive"))
+        pages[5].addArrangedSubview(button("Патроны", "ammoRefill"))
+        pages[5].addArrangedSubview(button("Магазин", "magazineFill"))
         pages[5].addArrangedSubview(toggle("Бесконечный запас патронов", key: "infiniteAmmo"))
         pages[5].addArrangedSubview(toggle("Без перезарядки", key: "noReload"))
         pages[5].addArrangedSubview(toggle("Rapid Fire · скорострельность", key: "rapidFire"))
@@ -1408,9 +1411,9 @@ private final class MenuController: UIViewController {
             MenuPreferences.shared.aimMiss = Double(miss?.value ?? 0)
             missLabel?.text = String(format: "Шанс пропуска наведения: %.0f%%", MenuPreferences.shared.aimMiss); self?.onChange?()
         }, for: .valueChanged); pages[6].addArrangedSubview(miss)
-        pages[6].addArrangedSubview(button("Исключения: ID и ники", "aimWhitelist"))
-        pages[6].addArrangedSubview(button("Добавить текущую цель в исключения", "aimExcludeTarget"))
-        pages[6].addArrangedSubview(button("Очистить исключения", "aimClearWhitelist"))
+        pages[6].addArrangedSubview(button("Список исключений", "aimWhitelist"))
+        pages[6].addArrangedSubview(button("Добавить цель", "aimExcludeTarget"))
+        pages[6].addArrangedSubview(button("Очистить список", "aimClearWhitelist"))
         stretchLabel.font = .systemFont(ofSize: 11); stretchLabel.textColor = .secondaryLabel
         stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", MenuPreferences.shared.stretch)
         stretchSlider.minimumValue = 1; stretchSlider.maximumValue = 1.6
@@ -1462,20 +1465,20 @@ private final class MenuController: UIViewController {
         pages[7].addArrangedSubview(stretchLabel); pages[7].addArrangedSubview(stretchSlider)
         stretchStatus.font = .systemFont(ofSize: 10); stretchStatus.textColor = .systemOrange; stretchStatus.numberOfLines = 0
         pages[7].addArrangedSubview(stretchStatus)
-        pages[7].addArrangedSubview(button("Вернуть обычное изображение", "stretchReset"))
+        pages[7].addArrangedSubview(button("Сброс растяга", "stretchReset"))
         pages[7].addArrangedSubview(toggle("Сокращения в чате", key: "aliasesAuto"))
-        pages[7].addArrangedSubview(button("Быстрая команда", "commandCompose"))
-        pages[7].addArrangedSubview(button("Сокращения команд", "commandAliases"))
+        pages[7].addArrangedSubview(button("Команда", "commandCompose"))
+        pages[7].addArrangedSubview(button("Сокращения", "commandAliases"))
         pages[7].addArrangedSubview(toggle("Скрыть логотип сервера", key: "hideServerLogo"))
-        pages[7].addArrangedSubview(button("Очистить чат · /clearchat", "clearChat"))
+        pages[7].addArrangedSubview(button("Очистить чат", "clearChat"))
         pages[7].addArrangedSubview(toggle("Визуальный баланс", key: "visualBalance"))
-        pages[7].addArrangedSubview(button("Установить визуальный баланс", "visualBalanceSet"))
-        pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
+        pages[7].addArrangedSubview(button("Задать баланс", "visualBalanceSet"))
+        pages[7].addArrangedSubview(button("Отменить подмену", "modelCancel"))
         pages[7].addArrangedSubview(toggle("Авто-МП · /gevent", key: "autoEvent"))
         pages[7].addArrangedSubview(note("Вход по серверному объявлению о наборе с /gevent. Повторы игнорируются."))
         pages[7].addArrangedSubview(toggle("FPS UP", key: "fpsUp"))
         pages[7].addArrangedSubview(note("50% разрешения 3D, без сглаживания GLK, ESP и чамсов. При выключении настройки возвращаются."))
-        pages[7].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
+        pages[7].addArrangedSubview(button("Выключить всё", "resetControls"))
         pages[7].addArrangedSubview(toggle("Плавающая кнопка", key: "bubble", fallback: true))
         pages[7].addArrangedSubview(toggle("Анимации", key: "animations", fallback: true))
         pages[7].addArrangedSubview(toggle("Увеличенное меню", key: "large"))
@@ -1504,6 +1507,7 @@ private final class MenuController: UIViewController {
             if let color = customColor?.selectedColor { MenuPreferences.shared.setCustomAccent(color); self?.applyTheme(); self?.onChange?() }
         }, for: .valueChanged)
         pages[7].addArrangedSubview(customColor)
+        compactPages26()
         bubble.setTitle("RM", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
         bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Открыть React Modifications"
         bubble.addAction(UIAction { [weak self] _ in self?.onAction?("collapse") }, for: .touchUpInside)
@@ -1512,6 +1516,149 @@ private final class MenuController: UIViewController {
         NSLayoutConstraint.activate([bubble.leadingAnchor.constraint(equalTo: view.leadingAnchor), bubble.trailingAnchor.constraint(equalTo: view.trailingAnchor), bubble.topAnchor.constraint(equalTo: view.topAnchor), bubble.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
         showPage(nil); applyCollapse()
     }
+
+    // Reparent existing controls; their callbacks, defaults and values stay intact.
+    private func contains26(_ view: UIView, _ key: String) -> Bool {
+        view.accessibilityIdentifier == "diagnostics." + key || view.subviews.contains { contains26($0, key) }
+    }
+    private func detach26(_ view: UIView, from stack: UIStackView) {
+        stack.removeArrangedSubview(view); view.removeFromSuperview()
+    }
+    private func paired26(_ views: [UIView]) -> [UIView] {
+        var result: [UIView] = [], pending: [UIView] = []
+        func flush() {
+            guard !pending.isEmpty else { return }
+            if pending.count == 1 { result.append(pending[0]) }
+            else {
+                let row = UIStackView(arrangedSubviews: pending); row.spacing = 6; row.distribution = .fillEqually
+                result.append(row)
+            }
+            pending.removeAll()
+        }
+        for view in views {
+            if let button = view as? UIButton, !button.showsMenuAsPrimaryAction {
+                if var config = button.configuration {
+                    config.titleLineBreakMode = .byWordWrapping
+                    config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                        var value = attributes; value.font = .systemFont(ofSize: 14, weight: .medium); return value
+                    }
+                    button.configuration = config
+                }
+                pending.append(button); if pending.count == 2 { flush() }
+            } else { flush(); result.append(view) }
+        }
+        flush(); return result
+    }
+    private func settings26(_ page: Int, key: String, title: String, ranges: [(String, String?, Bool)]) {
+        let stack = pages[page], original = stack.arrangedSubviews
+        guard let primary = original.first(where: { contains26($0, key) }) else { return }
+        var chosen = Set<ObjectIdentifier>()
+        for (start, end, includeStart) in ranges {
+            guard let a = original.firstIndex(where: { contains26($0, start) }) else { continue }
+            let b = end.flatMap { value in original.firstIndex(where: { contains26($0, value) }) } ?? original.count
+            let first = a + (includeStart ? 0 : 1)
+            if first < b { for view in original[first..<b] where view !== primary { chosen.insert(ObjectIdentifier(view)) } }
+        }
+        let detail = original.filter { chosen.contains(ObjectIdentifier($0)) }
+        guard !detail.isEmpty, let index = stack.arrangedSubviews.firstIndex(of: primary) else { return }
+        detach26(primary, from: stack); detail.forEach { detach26($0, from: stack) }
+        let body = UIStackView(); body.axis = .vertical; body.spacing = 6; body.isHidden = true
+        body.isLayoutMarginsRelativeArrangement = true; body.directionalLayoutMargins = .init(top: 4, leading: 8, bottom: 8, trailing: 8)
+        for view in paired26(detail) { body.addArrangedSubview(view) }
+        let gear = UIButton(type: .system); gear.setImage(UIImage(systemName: "gearshape"), for: .normal)
+        gear.accessibilityIdentifier = "diagnostics.settings." + key; gear.accessibilityLabel = "Настройки: " + title
+        gear.widthAnchor.constraint(equalToConstant: 44).isActive = true; gear.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        gear.addAction(UIAction { [weak self, weak body] _ in
+            self?.onAction?("flightRelease"); body?.isHidden.toggle(); self?.refreshSections26()
+        }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [primary, gear]); row.spacing = 4; row.alignment = .center
+        let wrapper = UIStackView(arrangedSubviews: [row, body]); wrapper.axis = .vertical; wrapper.spacing = 0
+        stack.insertArrangedSubview(wrapper, at: index)
+        disclosures26.append((gear, body, title))
+    }
+    private func section26(_ page: Int, key: String, title: String, views: [UIView], open: Bool = false) -> UIView {
+        let body = UIStackView(); body.axis = .vertical; body.spacing = 6; body.isHidden = !open
+        body.isLayoutMarginsRelativeArrangement = true; body.directionalLayoutMargins = .init(top: 4, leading: 8, bottom: 8, trailing: 8)
+        for view in paired26(views) { body.addArrangedSubview(view) }
+        let header = UIButton(type: .system)
+        header.accessibilityIdentifier = "diagnostics.group." + key
+        header.accessibilityLabel = title
+        header.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        header.addAction(UIAction { [weak self, weak body] _ in
+            self?.onAction?("flightRelease"); body?.isHidden.toggle(); self?.refreshSections26()
+        }, for: .touchUpInside)
+        let card = UIStackView(arrangedSubviews: [header, body]); card.axis = .vertical; card.spacing = 0
+        card.backgroundColor = UIColor.white.withAlphaComponent(0.035); card.layer.cornerRadius = 12; card.clipsToBounds = true
+        sections26.append((header, body, title)); return card
+    }
+    private func group26(_ page: Int, plan: [(String, String, String, Bool)]) {
+        let stack = pages[page], original = stack.arrangedSubviews
+        let starts = plan.compactMap { item -> (Int, String, String, Bool)? in
+            guard let index = original.firstIndex(where: { contains26($0, item.2) }) else { return nil }
+            return (index, item.0, item.1, item.3)
+        }
+        guard !starts.isEmpty else { return }
+        for view in original { detach26(view, from: stack) }
+        for view in paired26(Array(original.prefix(starts[0].0))) { stack.addArrangedSubview(view) }
+        for (i, item) in starts.enumerated() {
+            let end = i + 1 < starts.count ? starts[i+1].0 : original.count
+            guard item.0 < end else { continue }
+            stack.addArrangedSubview(section26(page, key: item.1, title: item.2, views: Array(original[item.0..<end]), open: item.3))
+        }
+    }
+    private func refreshSections26() {
+        for (gear, body, _) in disclosures26 {
+            gear.isSelected = !body.isHidden
+            gear.accessibilityValue = body.isHidden ? "Закрыто" : "Открыто"
+            gear.tintColor = body.isHidden ? .secondaryLabel : MenuPreferences.shared.accent
+        }
+        func active(_ view: UIView) -> Int {
+            (view as? UISwitch).map { $0.isOn ? 1 : 0 } ?? view.subviews.reduce(0) { $0 + active($1) }
+        }
+        for (header, body, title) in sections26 {
+            let count = active(body)
+            var config = UIButton.Configuration.plain(); config.title = title
+            config.subtitle = count > 0 ? "Включено: \(count)" : nil
+            config.image = UIImage(systemName: body.isHidden ? "chevron.right" : "chevron.down")
+            config.imagePadding = 8; config.baseForegroundColor = MenuPreferences.shared.accent
+            config.contentInsets = .init(top: 8, leading: 10, bottom: 8, trailing: 10)
+            header.configuration = config; header.contentHorizontalAlignment = .leading
+            header.accessibilityValue = body.isHidden ? "Закрыто" : "Открыто"
+        }
+    }
+    private func compactPages26() {
+        settings26(1, key: "chams", title: "Чамсы", ranges: [("chams", "espName", false)])
+        settings26(1, key: "esp", title: "ESP", ranges: [("esp", "chams", false), ("espName", "hud", true)])
+        settings26(2, key: "runSpeed", title: "Скорость бега", ranges: [("runSpeed", "flightStatus", false)])
+        settings26(2, key: "flightToggle", title: "AirBrake", ranges: [("flightToggle", "waypoint", false)])
+        settings26(3, key: "vehicleAcceleration", title: "Разгон", ranges: [("vehicleAcceleration", "launchAssist", false)])
+        settings26(4, key: "fastAnim", title: "Анимации", ranges: [("fastAnim", "skinSet", false)])
+        settings26(5, key: "customShotSound", title: "Звук выстрела", ranges: [("customShotSound", "customHitSound", false)])
+        settings26(5, key: "customHitSound", title: "Звук попадания", ranges: [("customHitSound", "noSpread", false)])
+        settings26(5, key: "rapidFire", title: "Rapid Fire", ranges: [("rapidFire", "extraDamage", false)])
+        settings26(5, key: "extraDamage", title: "Урон", ranges: [("extraDamage", nil, false)])
+        settings26(6, key: "regularAim", title: "Обычный Aim", ranges: [("regularAim", "triggerBot", false)])
+        settings26(6, key: "triggerBot", title: "TriggerBot", ranges: [("triggerBot", "silentAim", false)])
+        settings26(6, key: "silentAim", title: "Silent Aim", ranges: [("silentAim", nil, false)])
+        settings26(7, key: "fakeLag", title: "Fake Lag", ranges: [("fakeLag", "cameraFOVOverride", false)])
+        settings26(7, key: "cameraFOVOverride", title: "Камера", ranges: [("cameraFOVOverride", "worldTimeOverride", false)])
+        settings26(7, key: "worldTimeOverride", title: "Время суток", ranges: [("worldTimeOverride", "worldWeatherOverride", false)])
+        // Weather parameters stop before the separate aspect-ratio controls.
+        let weatherPage = pages[7].arrangedSubviews
+        if let aspect = weatherPage.first(where: { contains26($0, "aspectOriginal") }) { aspect.accessibilityIdentifier = "diagnostics.aspectControls" }
+        settings26(7, key: "worldWeatherOverride", title: "Погода", ranges: [("worldWeatherOverride", "aspectControls", false)])
+        group26(1, plan: [("hud", "Экран и HUD", "hud", false)])
+        group26(2, plan: [("movement", "Передвижение", "runSpeed", true), ("teleports", "Телепорты", "waypoint", false), ("impulses", "Прыжки и вода", "hopHeading", false), ("physics", "Масса и гравитация", "massHeading", false)])
+        group26(3, plan: [("vehicleAccess", "Доступ и модель", "unlockVehicle", true), ("vehicleCare", "Ремонт и защита", "stopVehicle", false), ("vehicleTuning", "Разгон и тюнинг", "vehicleAcceleration", false)])
+        group26(4, plan: [("animations", "Анимации", "antiFreeze", true), ("appearance", "Скин и сброс", "skinSet", false), ("health", "Здоровье и защита", "localProof", false)])
+        group26(5, plan: [("sounds", "Звуки", "customShotSound", false), ("weapons", "Стрельба и патроны", "noSpread", true)])
+        // Put frequently used weapon controls before the sound settings.
+        let weaponCards = pages[5].arrangedSubviews
+        if weaponCards.count == 3 { let sounds = weaponCards[1]; detach26(sounds, from: pages[5]); pages[5].addArrangedSubview(sounds) }
+        group26(7, plan: [("world", "Мир и камера", "cameraFOVOverride", false), ("chat", "Чат и сервис", "aliasesAuto", false), ("performance", "Производительность", "fpsUp", false), ("appearanceMenu", "Оформление меню", "bubble", false)])
+        refreshSections26()
+    }
+
     private func soundPicker(hit: Bool) -> UIButton {
         let kind = hit ? "hit" : "shot", picker = UIButton(type: .system)
         picker.accessibilityIdentifier = "diagnostics.\(kind)Presets"
@@ -1544,7 +1691,7 @@ private final class MenuController: UIViewController {
         control.addAction(UIAction { [weak self, weak control] _ in
             MenuPreferences.shared.set(key, control?.isOn ?? false)
             if key == "bubble" { self?.showBubble = control?.isOn ?? true }
-            self?.onChange?()
+            self?.refreshSections26(); self?.onChange?()
         }, for: .valueChanged)
         row.addArrangedSubview(label); row.addArrangedSubview(control); return row
     }
@@ -1562,6 +1709,7 @@ private final class MenuController: UIViewController {
             root.subviews.forEach { visit($0) }
         }
         visit(view)
+        refreshSections26()
     }
     func syncControlToggles() {
         func visit(_ view: UIView) {
@@ -1572,6 +1720,7 @@ private final class MenuController: UIViewController {
             for child in view.subviews { visit(child) }
         }
         visit(view)
+        refreshSections26()
     }
     private func showPage(_ selected: Int?) {
         onAction?("flightRelease"); selectedPage = selected
