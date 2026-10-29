@@ -1,4 +1,8 @@
 #import "PlayerSnapshot.h"
+#import <objc/runtime.h>
+#import <OpenGLES/EAGL.h>
+#import <OpenGLES/ES2/gl.h>
+#import <dispatch/dispatch.h>
 #import <mach/mach.h>
 #import <mach/vm_map.h>
 #import <mach-o/dyld.h>
@@ -16,6 +20,8 @@
 #include <string>
 #include <vector>
 #include "AimMath.hpp"
+#include "ReactPolicies.hpp"
+#include <unordered_map>
 
 namespace {
 // Static evidence applies only to this exact blackrussia-client build.
@@ -78,24 +84,38 @@ Flight flight;
 struct Assists {
     bool health=false,armor=false,stamina=false,vehicleHealth=false,slowFall=false;
     bool noClip=false,proof=false,noFall=false,vehicleProof=false,ammo=false,magazine=false,rapid=false;
-    bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false;
-    double fireRate=2,animationRate=2;
+    bool noCollision=false,noSpread=false,noAnim=false,fastAnim=false,runSpeed=false;
+    bool vehicleAcceleration=false,launchAssist=false,strobe=false,hydraulics=false;
+    double fireRate=2,animationRate=2,runMultiplier=1.5,accelerationFactor=2;
 };
 Assists assists;
+std::atomic<bool> collectSkeleton22{false};
+NSString *medicineCommand22=@"";
+bool medicineEnabled22=false;
+double medicineThreshold22=35,medicineInterval22=15;
+React22::Medicine medicine22;
+struct ImpactPoint22 {uint64_t ped=0,local=0,base=0;uint16_t id=0;V3 point{};double time=0;};
+std::mutex impactMutex22;ImpactPoint22 impactPoint22;
 struct Local { uint64_t base=0,pool=0,local=0,ped=0,vehicle=0; uint16_t id=0; V3 position{},velocity{}; };
 bool anchors(uint64_t base) {
-    uint32_t getter=0,position=0,velocity=0;
+    uint32_t getter=0,position=0,velocity=0,inVehicle=0;
     return read(base+0x92d4c8,getter)&&getter==0xf9401c00U&&
         read(base+0x9aabe8,position)&&position==0x2d07266aU&&
-        read(base+0x15349c,velocity)&&velocity==0xfd00c260U;
+        read(base+0x15349c,velocity)&&velocity==0xfd00c260U&&
+        read(base+0xf94e8,inVehicle)&&inVehicle==0x39552109U;
 }
 bool getLocal(Local &s) {
     s.base=imageBase();
     if(!s.base||!anchors(s.base))return false;
-    return read(s.base+0x340de18,s.pool)&&s.pool&&read(s.pool,s.local)&&s.local&&
+    uint64_t referencedVehicle=0;uint8_t inVehicle=0;
+    const bool valid=read(s.base+0x340de18,s.pool)&&s.pool&&read(s.pool,s.local)&&s.local&&
         read(s.local,s.id)&&s.id<1504&&read(s.local+0x38,s.ped)&&s.ped&&
         read(s.ped+0x38,s.position)&&finite(s.position)&&
-        read(s.ped+0x180,s.velocity)&&finite(s.velocity)&&read(s.ped+0x540,s.vehicle);
+        read(s.ped+0x180,s.velocity)&&finite(s.velocity)&&read(s.ped+0x540,referencedVehicle)&&read(s.ped+0x548,inVehicle);
+    // FindPlayerVehicle (f94e8..f94f4) checks this exact flag before returning
+    // +540. The ped can retain the last vehicle reference after dismounting.
+    s.vehicle=valid&&inVehicle==1?referencedVehicle:0;
+    return valid;
 }
 bool sameLocal(const Local &s) {
     uint64_t pool=0,local=0,ped=0;uint16_t id=0;
@@ -106,6 +126,18 @@ template<class T> bool writeData(uint64_t address,const T &value) {
     T before{};if(!read(address,before))return false;
     return vm_write(mach_task_self(),static_cast<vm_address_t>(address),
         reinterpret_cast<vm_offset_t>(&value),static_cast<mach_msg_type_number_t>(sizeof(T)))==KERN_SUCCESS;
+}
+struct RunTrack {uint64_t ped=0,local=0;uint16_t id=0;V3 after{};};
+RunTrack runTrack;
+void updateRunSpeed(const Local &s,double elapsed,bool alive) {
+    if(!assists.runSpeed||!alive||s.vehicle||flight.active||std::abs(s.velocity.z)>0.06f){runTrack={};return;}
+    if(runTrack.ped!=s.ped||runTrack.local!=s.local||runTrack.id!=s.id){runTrack={s.ped,s.local,s.id,s.position};return;}
+    const V3 previous=runTrack.after;runTrack.after=s.position;float extraX=0,extraY=0;
+    if(!React19::runStep(s.position.x-previous.x,s.position.y-previous.y,s.velocity.x,s.velocity.y,elapsed,assists.runMultiplier,extraX,extraY)||!sameLocal(s))return;
+    V3 next{s.position.x+extraX,s.position.y+extraY,s.position.z};
+    if(!finite(next)||std::abs(next.x)>20000||std::abs(next.y)>20000)return;
+    const uint8_t dirty=1;
+    if(writeData(s.ped+0x60,dirty)&&writeData(s.ped+0x38,next))runTrack.after=next;
 }
 struct MassBackup { uint64_t entity=0,ped=0,local=0;float original=0;uint16_t id=0; };
 MassBackup pedMass,vehicleMass;
@@ -147,6 +179,67 @@ bool liveVehicle(const VehicleRef &v) {
     return v.vehicle&&read(v.base+0x340de20,pool)&&pool==v.pool&&read(pool+uint64_t(v.id)*8,net)&&net==v.net&&
         read(net,vehicle)&&vehicle==v.vehicle&&read(vehicle+0x174,generation)&&generation==v.generation;
 }
+
+struct Hydraulic22 {VehicleRef ref{};uint8_t original=0;bool active=false;};
+Hydraulic22 hydraulic22;
+void restoreHydraulics22() {
+    if(hydraulic22.active&&liveVehicle(hydraulic22.ref)) {
+        uint8_t current=0;uint64_t lines=0;
+        if(read(hydraulic22.ref.vehicle+0x570,current)&&current==1) {
+            if(!hydraulic22.original&&read(hydraulic22.ref.vehicle+0xae8,lines)&&lines&&anchorAt(hydraulic22.ref.base,0xacea68,0xd100c3ffU)) {
+                using Reset=void(*)(void *);reinterpret_cast<Reset>(hydraulic22.ref.base+0xacea68)(reinterpret_cast<void *>(hydraulic22.ref.vehicle));
+            }
+            (void)writeData(hydraulic22.ref.vehicle+0x570,hydraulic22.original);
+        }
+    }
+    hydraulic22={};
+}
+struct CarTrack22 {VehicleRef ref{};uint64_t ped=0;V3 after{};double time=0;};
+CarTrack22 carTrack22;
+struct Strobe22 {VehicleRef ref{};uint8_t original=0;bool active=false,last=false;double next=0;};
+Strobe22 strobe22;
+void restoreStrobe22() {
+    if(strobe22.active&&liveVehicle(strobe22.ref)&&anchorAt(strobe22.ref.base,0x944828,0xa9be4ff4U)) {
+        using Set=void(*)(void *,uint32_t);reinterpret_cast<Set>(strobe22.ref.base+0x944828)(reinterpret_cast<void *>(strobe22.ref.net),strobe22.original);
+    }
+    strobe22={};
+}
+void updateCar22(const Local &s,double elapsed,bool alive) {
+    uint64_t driver=0;uint32_t kind=99;VehicleRef ref{};
+    const bool driving=alive&&s.vehicle&&read(s.vehicle+0x2f0,driver)&&driver==s.ped&&read(s.vehicle+0x430,kind)&&kind==0&&vehicleRef(s.base,s.vehicle,ref)&&sameLocal(s);
+    if(strobe22.active&&(!assists.strobe||!driving||strobe22.ref.vehicle!=s.vehicle||!liveVehicle(strobe22.ref)))restoreStrobe22();
+    if(hydraulic22.active&&(!assists.hydraulics||!driving||hydraulic22.ref.vehicle!=s.vehicle||!liveVehicle(hydraulic22.ref)))restoreHydraulics22();
+    if(!driving){carTrack22={};return;}
+    if(assists.hydraulics&&!hydraulic22.active&&anchorAt(s.base,0xac1660,0x3955c268U)&&anchorAt(s.base,0xacea68,0xd100c3ffU)) {
+        uint8_t enabled=0;uint64_t lines=0,model=0;
+        if(read(s.vehicle+0x570,enabled)&&enabled<=1&&read(s.vehicle+0xae8,lines)&&lines&&read(s.vehicle+0x728,model)&&model) {
+            hydraulic22={ref,enabled,true};const uint8_t one=1;(void)writeData(s.vehicle+0x570,one);
+        }
+    }
+    const double now=NSProcessInfo.processInfo.systemUptime;
+    if(assists.strobe&&anchorAt(s.base,0x944828,0xa9be4ff4U)) {
+        // The local network presentation stores the light state as an optional bool.
+        uint64_t presentation=0;uint8_t present=0,lights=0;
+        if(!strobe22.active&&read(ref.net+8,presentation)&&presentation&&read(presentation+0x2ab,present)&&(present&1)&&read(presentation+0x2aa,lights)&&lights<=1)
+            strobe22={ref,lights,true,bool(lights),0};
+        if(strobe22.active&&now>=strobe22.next) {
+            strobe22.last=!strobe22.last;strobe22.next=now+0.15;
+            using Set=void(*)(void *,uint32_t);reinterpret_cast<Set>(s.base+0x944828)(reinterpret_cast<void *>(ref.net),strobe22.last);
+        }
+    }
+    if(!assists.vehicleAcceleration&&!assists.launchAssist){carTrack22={};return;}
+    V3 speed{},forward{};
+    if(!read(s.vehicle+0x180,speed)||!read(s.vehicle+0x18,forward)||!finite(speed)||!finite(forward)||std::abs(speed.z)>0.08f){carTrack22={};return;}
+    if(carTrack22.ref.vehicle!=ref.vehicle||carTrack22.ref.net!=ref.net||carTrack22.ref.generation!=ref.generation||carTrack22.ped!=s.ped||now-carTrack22.time>0.15){carTrack22={ref,s.ped,speed,now};return;}
+    float x=0,y=0;double factor=assists.vehicleAcceleration?assists.accelerationFactor:1;
+    if(assists.launchAssist&&std::hypot(speed.x,speed.y)<0.25)factor=std::max(factor,3.0);
+    const V3 previous=carTrack22.after;carTrack22={ref,s.ped,speed,now};
+    if(React22::acceleration(previous.x,previous.y,speed.x,speed.y,forward.x,forward.y,elapsed,factor,x,y)&&liveVehicle(ref)) {
+        speed.x+=x;speed.y+=y;
+        if(writeData(s.vehicle+0x180,speed))carTrack22.after=speed;
+    }
+}
+
 struct Weapon {uint64_t brain=0,begin=0,end=0,address=0,info=0;uint8_t slot=0,id=0;int32_t state=0,clip=0,total=0;uint32_t capacity=0,next=0;};
 bool getWeapon(const Local &s,Weapon &w) {
     if(!anchorAt(s.base,0x9d6400,0x39411008U)||!anchorAt(s.base,0xb0bb30,0xb9000a68U)||!anchorAt(s.base,0xb0bb40,0xb9000e68U))return false;
@@ -166,7 +259,7 @@ bool getWeapon(const Local &s,Weapon &w) {
         uint64_t next=0;if(!read(node+0x210,next)||next==node)return false;node=next;
     }
     uint32_t fire=0;
-    return w.info&&read(w.info+0x20,fire)&&fire==1&&read(w.info+0x34,w.capacity)&&w.capacity>=1&&w.capacity<=1000;
+    return w.info&&read(w.info+0x20,fire)&&(fire==1||fire==4)&&read(w.info+0x34,w.capacity)&&w.capacity>=1&&w.capacity<=1000;
 }
 bool sameWeapon(const Local &s,const Weapon &w) {
     uint64_t brain=0,begin=0,end=0;uint8_t slot=0,id=0;
@@ -222,6 +315,8 @@ bool restoreGravity(const Local &s,GravityBackup &backup) {
     if(!writeData(backup.entity+0x170,backup.original))return false;
     backup={};return true;
 }
+struct RapidBackup22 {uint64_t ped=0,weapon=0,local=0;uint32_t last=0;uint8_t id=0;};
+RapidBackup22 rapid22;
 void weaponAssists(const Local &s) {
     if(!assists.ammo&&!assists.magazine&&!assists.rapid)return;
     Weapon w;if(!getWeapon(s,w)||!sameWeapon(s,w))return;
@@ -233,15 +328,16 @@ void weaponAssists(const Local &s) {
         if(w.state==2&&clip>0){const int32_t ready=0;(void)writeData(w.address+4,ready);}
     }
     if(assists.rapid&&w.state==1) {
-        static uint64_t lastWeapon=0;static uint32_t lastAdjusted=0;
-        if(w.address==lastWeapon&&w.next==lastAdjusted)return;
         uint32_t now=0;if(!read(s.base+0x2f348e0,now))return;
-        const int32_t remaining=int32_t(w.next-now);
-        if(remaining>0&&remaining<60000) {
-            const uint32_t next=now+uint32_t(double(remaining)/assists.fireRate);
-            if(writeData(w.address+16,next)){lastWeapon=w.address;lastAdjusted=next;}
+        if(rapid22.weapon!=w.address||rapid22.ped!=s.ped||rapid22.local!=s.local||rapid22.id!=w.id)rapid22={s.ped,w.address,s.local,0,w.id};
+        if(w.next!=rapid22.last) {
+            const int32_t remaining=int32_t(w.next-now);
+            if(remaining>0&&remaining<60000) {
+                const uint32_t next=now+std::max(1U,uint32_t(double(remaining)/assists.fireRate));
+                if(writeData(w.address+16,next))rapid22.last=next;
+            }
         }
-    }
+    } else rapid22={};
 }
 
 // Catalog (1024-pointer chunks) and streaming slots (512 x 96-byte chunks)
@@ -253,14 +349,14 @@ bool registeredBit(uint64_t base,uint64_t header,uint32_t id) {
     return read(begin+uint64_t(id/64)*8,word)&&((word>>(id%64))&1);
 }
 uint64_t modelCatalog(uint64_t base,uint32_t id,uint8_t expected=0) {
-    if(id>1000000||!registeredBit(base,0x19b22a8,id))return 0;
+    if(!registeredBit(base,0x19b22a8,id))return 0;
     uint64_t chunks=0,chunk=0,info=0;uint8_t kind=0;
     if(!read(base+0x19b2290,chunks)||!chunks||!read(chunks+uint64_t(id/1024)*8,chunk)||!chunk||
        !read(chunk+uint64_t(id%1024)*8,info)||!info||!read(info+0x20,kind))return 0;
     return !expected||kind==expected?info:0;
 }
 uint64_t streamSlot(uint64_t base,uint32_t id) {
-    if(id>1000000||!registeredBit(base,0x2ed3c30,id))return 0;
+    if(!registeredBit(base,0x2ed3c30,id))return 0;
     uint64_t chunks=0,chunk=0;
     if(!read(base+0x2ed3c18,chunks)||!chunks||!read(chunks+uint64_t(id/512)*8,chunk)||!chunk)return 0;
     return chunk+uint64_t(id%512)*96;
@@ -317,7 +413,9 @@ void updateAnimations(const Local &s) {
        !read(s.base+0x2118bc0,offset)||offset<0||offset>0x10000||!read(clump+offset,data)||!data||!read(data,node)||
        !read(s.ped+0x4b0,hp)||!std::isfinite(hp))return;
     if(animationState.ped!=s.ped||animationState.local!=s.local||animationState.id!=s.id||animationState.clump!=clump)animationState={};
-    const bool enabled=hp>0&&(assists.noAnim||assists.fastAnim);
+    Weapon rapidWeapon{};
+    const bool rapid=hp>0&&assists.rapid&&getWeapon(s,rapidWeapon)&&sameWeapon(s,rapidWeapon)&&rapidWeapon.state<=1&&rapidWeapon.clip>0;
+    const bool enabled=hp>0&&(assists.noAnim||assists.fastAnim||rapid);
     std::vector<AnimationBackup> next;std::unordered_set<uint64_t> seen;
     for(int i=0;i<64&&node&&seen.insert(node).second;++i) {
         uint64_t link=0,hierarchy=0;int16_t id=0;uint16_t flags=0;float speed=0;
@@ -338,8 +436,10 @@ void updateAnimations(const Local &s) {
             if(!writeData(node+0x42,restored)){next.push_back(entry);node=link;continue;}
             entry.paused=false;
         }
-        if(enabled) {
-            const float desired=assists.noAnim?0.f:std::min(32.f,float(entry.original*assists.animationRate));
+        const bool weaponAnimation=rapid&&(id==0xf8||id==0xf9||id==0xfa||id==0xfb);
+        if(enabled&&(assists.noAnim||assists.fastAnim||weaponAnimation)) {
+            const double factor=assists.fastAnim?assists.animationRate:1;
+            const float desired=assists.noAnim?0.f:std::min(32.f,float(entry.original*std::max(factor,weaponAnimation?assists.fireRate:1.0)));
             if(writeData(node+0x34,desired))entry.last=desired;
             next.push_back(entry);
         } else if(found!=animationState.entries.end()&&speed==entry.last&&!writeData(node+0x34,entry.original))next.push_back(entry);
@@ -377,8 +477,21 @@ AimSettings aimSettings;
 std::array<AimActor,128> aimActors{};size_t aimCount=0;
 double aimReceived=0;AimActor aimChosen{};bool aimHasChosen=false;
 uint16_t aimOwnID=UINT16_MAX;float aimRange=0;V3 aimOwnPosition{};
-std::atomic<bool> aimEnabled{false};
+std::atomic<bool> regularAimEnabled{false},customShotEnabled{false},customHitEnabled{false},hideLogoEnabled{false},localCommandsEnabled{false};
+std::atomic<double> aimSmoothSeconds{0.2};
+std::atomic<int64_t> displayBalance21{-1};
+std::atomic<bool> regularAimVisible{true};
+std::atomic<bool> aimEnabled{false},triggerEnabled{false},antiFreezeEnabled{false};
+std::atomic<int> lagIntervalMs{0},triggerDelayMs{120},triggerRadius{10};
+std::atomic<bool> triggerAimOnly{true};
+std::atomic<double> lagSentAt{0};
+std::atomic<uint64_t> lagOwner{0},lagShots{0};
+std::mutex triggerMutex;
+struct TriggerState {uint64_t ped=0;uint16_t target=UINT16_MAX;double acquired=0;uint32_t frame=UINT32_MAX;bool held=false,pressed=false;};
+TriggerState triggerState;
+void resetTrigger() {std::lock_guard<std::mutex> lock(triggerMutex);triggerState={};}
 std::atomic<uint64_t> aimCallbacks{0},aimRedirects{0},aimSkipped{0};
+std::atomic<uint64_t> ownShotEvents{0};
 bool aimBridgeReady(uint64_t base) {
     // Check the immutable bridge, trampoline and symbol name together.
     std::array<uint32_t,6> manifest{};std::array<uint8_t,20> trampoline{};
@@ -392,6 +505,30 @@ bool aimBridgeReady(uint64_t base) {
        !read(base+0x2100,symbol)||std::memcmp(symbol.data(),"BRMenuQueueHook15",17)!=0)return false;
     return true;
 }
+
+std::atomic<float> desiredCameraFOV{0};
+std::atomic<int> desiredTime{-1},desiredWeather{-1};
+std::atomic<bool> automaticAliases{false};
+std::mutex chatAliasMutex;
+std::unordered_map<std::string,std::string> chatAliases;
+bool extensionBridgeReady(uint64_t base) {
+    std::array<char,8> magic{};uint32_t version=0,count=0;
+    if(!base||!read(base+0x3f00,magic)||std::memcmp(magic.data(),"REACT21",8)||!read(base+0x3f08,version)||version!=1||!read(base+0x3f0c,count)||count!=13)return false;
+    const std::array<uint32_t,4> expected[]={{0x9f5fc4,0x3000,0x3b00,0x3c40},{0xbf228,0x3300,0x3b20,0x3c80},{0xa524f4,0x3600,0x3b40,0x3cc0},{0xa76558,0x3900,0x3b60,0x3d00},{0x930724,0x1100,0x3b80,0x3d40},{0xf6e94,0x1400,0x3ba0,0x3d80},{0xf6f48,0x1700,0x3bc0,0x3dc0},{0xb0cfac,0x1a00,0x3be0,0x3e00},{0x953420,0x1d00,0x3c00,0x3e40},{0xb0dd5c,0x2700,0x2340,0x2400},{0x64adc,0x2900,0x2360,0x2440},{0xb0f064,0x2b00,0x2380,0x2480},{0x96ff18,0x2d40,0x23a0,0x21c0}};
+    for(uint32_t i=0;i<13;++i) {
+        std::array<uint32_t,4> record{};uint32_t opcode=0;
+        const auto &r=expected[i];
+        const uint32_t branch=0x14000000U|((uint32_t((int64_t(r[1])-r[0])/4))&0x3ffffffU);
+        if(!read(base+0x3f10+i*16,record)||record!=r||!read(base+r[0],opcode)||opcode!=branch)return false;
+    }
+    return true;
+}
+bool chatCommandToken(const std::string &s) {
+    if(s.size()<2||s.size()>49||s[0]!='/')return false;
+    for(size_t i=1;i<s.size();++i)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='A'&&s[i]<='Z')||(s[i]>='0'&&s[i]<='9')||s[i]=='_'))return false;
+    return true;
+}
+std::string lowerCommand(std::string value) {for(char &c:value)if(c>='A'&&c<='Z')c=char(c-'A'+'a');return value;}
 
 std::atomic<float> projectionScale{1};
 std::atomic<uint64_t> projectionCallbacks{0};
@@ -408,7 +545,7 @@ V3 aimPoint(const AimActor &a,V3 root,bool head) {
 }
 void resetAimTarget() {std::lock_guard<std::mutex> lock(aimMutex);aimHasChosen=false;aimRange=0;}
 void tickAimContext() {
-    if(!aimEnabled.load(std::memory_order_relaxed))return;
+    if(!aimEnabled.load(std::memory_order_relaxed)&&!triggerEnabled.load()&&!regularAimEnabled.load())return;
     Local s;Weapon w;float range=0,health=0;uint32_t state=0;bool valid=false;
     NSString *reason=@"Ожидание персонажа или несовпадение UUID клиента";
     if(getLocal(s)) {
@@ -609,13 +746,9 @@ void tickWaypoint() {
 
 }
 
-// The on-disk bridge passes its original trampoline as argument five.
-// No text protection changes, JIT pages or runtime instruction writes are used.
-extern "C" __attribute__((used,visibility("default")))
-uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *to,AimQueue original) noexcept {
-    if(!original)return 0;
-    aimCallbacks.fetch_add(1,std::memory_order_relaxed);
-    V3 output{};bool redirect=false;
+namespace {
+bool adjustedShot21(void *owner,uint32_t weapon,const V3 *from,const V3 *to,V3 &output) noexcept {
+    bool redirect=false;
     if(aimEnabled.load(std::memory_order_relaxed)) {
         @autoreleasepool {
             AimActor chosen{};BRAim::View view{};bool selected=false,head=false;double miss=0,received=0;uint64_t generation=0;
@@ -641,11 +774,18 @@ uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *
                 }
                 Matrix camera{};const V3 target=aimPoint(chosen,root,head);
                 const uint64_t info=weapon<255?weaponDefinition(s.base,uint8_t(weapon)):0;uint32_t fire=0;
-                if(sameNick&&info&&read(info+0x20,fire)&&fire==1&&read(s.base+0x22892a0+0x900,camera)) {
+                if(sameNick&&info&&read(info+0x20,fire)&&(fire==1||fire==4)&&read(s.base+0x22892a0+0x900,camera)) {
                     std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());
                     BRAim::Vec adjusted{};
                     if(BRAim::score(view,aimVec(target))>=0&&BRAim::endpoint(aimVec(start),aimVec(end),aimVec(target),adjusted)) {
-                        if(BRAim::skip(arc4random_uniform(10000),miss))aimSkipped.fetch_add(1,std::memory_order_relaxed);
+                        uint32_t frame=0;bool skip=false;
+                        if(!read(s.base+0x2f348e0,frame))return false;
+                        {static std::mutex rollMutex;static uint32_t tick=UINT32_MAX,kind=0;static uint64_t ownerPed=0,config=0;static bool missed=false;
+                            std::lock_guard<std::mutex> lock(rollMutex);
+                            if(tick!=frame||kind!=weapon||ownerPed!=s.ped||config!=generation){tick=frame;kind=weapon;ownerPed=s.ped;config=generation;missed=BRAim::skip(arc4random_uniform(10000),miss);}
+                            skip=missed;
+                        }
+                        if(skip)aimSkipped.fetch_add(1,std::memory_order_relaxed);
                         else {
                             std::lock_guard<std::mutex> lock(aimMutex);
                             if(generation==aimConfigGeneration&&aimSettings.enabled&&!aimSettings.excluded[chosen.id]&&!aimSettings.names.count(chosen.nick.data())) {
@@ -658,6 +798,24 @@ uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *
         }
     }
     if(redirect&&!aimEnabled.load(std::memory_order_relaxed))redirect=false;
+    return redirect;
+}
+}
+
+// The on-disk bridge passes its original trampoline as argument five.
+// No text protection changes, JIT pages or runtime instruction writes are used.
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuQueueHook15(void *owner,uint32_t weapon,const V3 *from,const V3 *to,AimQueue original) noexcept {
+    if(!original)return 0;
+    aimCallbacks.fetch_add(1,std::memory_order_relaxed);
+    // A queue callback is a local shot event, not confirmation of damage/hit.
+    @autoreleasepool {
+        Local local;float hp=0;
+        if(getLocal(local)&&reinterpret_cast<uint64_t>(owner)==local.ped&&
+           !local.vehicle&&read(local.ped+0x4b0,hp)&&std::isfinite(hp)&&hp>0)
+            ownShotEvents.fetch_add(1,std::memory_order_relaxed);
+    }
+    V3 output{};const bool redirect=adjustedShot21(owner,weapon,from,to,output);
     if(redirect)aimRedirects.fetch_add(1,std::memory_order_relaxed);
     return original(owner,weapon,from,redirect?&output:to);
 }
@@ -669,7 +827,318 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
     return BRAim::projectionRatio(naturalAspect,scale);
 }
 
+extern "C" __attribute__((used,visibility("default")))
+float BRMenuFOV19(float natural) noexcept {return React22::stretchFOV(React19::fov(natural,desiredCameraFOV.load(std::memory_order_relaxed)),projectionScale.load(std::memory_order_relaxed));}
+extern "C" __attribute__((used,visibility("default")))
+uint64_t BRMenuClock19(uint32_t hour,uint32_t minute) noexcept {const int value=desiredTime.load();return React19::clock(hour,minute,value<0?-1:value/60,value<0?-1:value%60);}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuWeather19(uint32_t natural) noexcept {return React19::weather(natural,desiredWeather.load());}
+extern "C" __attribute__((used,visibility("default")))
+const char *BRMenuChat19(const char *input) noexcept {
+    if(!input||!automaticAliases.load())return input;
+    try {
+        std::string text;const uint64_t address=reinterpret_cast<uint64_t>(input);bool terminated=false;
+        for(size_t offset=0;offset<1024;) {
+            std::array<char,64> chunk{};const size_t size=std::min(size_t(64),size_t(4096-((address+offset)&4095)));
+            if(!copy(address+offset,chunk.data(),size))return input;
+            for(size_t i=0;i<size;++i) {if(!chunk[i]){terminated=true;break;}text.push_back(chunk[i]);}
+            if(terminated)break;offset+=size;
+        }
+        if(!terminated||text.empty()||text[0]!='/')return input;
+        const size_t boundary=text.find_first_of(" \t\r\n");
+        const std::string command=lowerCommand(text.substr(0,boundary));std::string replacement;
+        {std::lock_guard<std::mutex> lock(chatAliasMutex);auto i=chatAliases.find(command);if(i==chatAliases.end())return input;replacement=i->second;}
+        thread_local std::string output;output=replacement+(boundary==std::string::npos?"":text.substr(boundary));
+        return output.c_str();
+    }catch(...){return input;}
+}
+
+namespace {
+bool liveConnected(Local &s) {
+    int32_t state=0;float hp=0;uint32_t pedState=0;
+    return getLocal(s)&&read(s.base+0x340de10,state)&&state==14&&read(s.ped+0x4b0,hp)&&
+        read(s.ped+0x494,pedState)&&BRAim::living(hp,hp,pedState)&&sameLocal(s);
+}
+#include "Chams24.inc"
+#include "Water24.inc"
+#include "Event25.inc"
+#include "Damage24.inc"
+using FireInput=int32_t(*)(void *);
+int32_t triggerInput(void *pad,FireInput original,bool pressed) noexcept {
+    if(!original)return 0;
+    const int32_t manual=original(pad);
+    if(manual||!triggerEnabled.load()||![NSThread isMainThread])return manual;
+    @autoreleasepool {
+        Local s;Weapon weapon;uint16_t blocked=0;
+        if(!liveConnected(s)||s.vehicle||reinterpret_cast<uint64_t>(pad)!=s.base+0x2ed1638||
+           !read(s.base+0x2ed1638+0x10e,blocked)||blocked||!getWeapon(s,weapon)||!sameWeapon(s,weapon)||weapon.clip<=0)return 0;
+        // This is the exact weapon permission query in CPad::GetFire.
+        if(!anchorAt(s.base,0xf6ed8,0x94289d05U))return 0;
+        using Permission=bool(*)(void *,void *);
+        if(!reinterpret_cast<Permission>(s.base+0xb1e2ec)(reinterpret_cast<void *>(weapon.info),reinterpret_cast<void *>(s.ped)))return 0;
+        if(triggerAimOnly.load()) {
+            using AimInput=int32_t(*)(void *);
+            if(!reinterpret_cast<AimInput>(s.base+0xf7248)(pad))return 0;
+        }
+        const double now=NSProcessInfo.processInfo.systemUptime;uint32_t frame=0;
+        if(!read(s.base+0x2f348e0,frame))return 0;
+        std::lock_guard<std::mutex> triggerLock(triggerMutex);
+        if(triggerState.ped==s.ped&&triggerState.frame==frame)return pressed?triggerState.pressed:triggerState.held;
+        BRAim::View view{};std::array<AimActor,128> actors{};size_t count=0;double received=0;
+        std::array<bool,1504> excluded{};std::unordered_set<std::string> names;
+        {std::lock_guard<std::mutex> lock(aimMutex);view=aimSettings.view;actors=aimActors;count=aimCount;received=aimReceived;excluded=aimSettings.excluded;names=aimSettings.names;}
+        Matrix camera{};float range=0;uint16_t selected=UINT16_MAX;
+        if(now-received<=0.2&&read(s.base+0x22892a0+0x900,camera)&&read(weapon.info+0x28,range)&&range>0&&range<10000) {
+            std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());view.radius=triggerRadius.load();
+            // Pick from the shared snapshot first; re-read only that actor each frame.
+            std::array<BRAim::Candidate,128> candidates{};
+            const double radius=view.radius;view.radius=radius+16;
+            for(size_t i=0;i<count;++i) {
+                const auto &actor=actors[i];
+                candidates[i]={actor.id,aimVec(aimPoint(actor,actor.root,false)),actor.hp,actor.physicalHP,actor.state,
+                    actor.id>=1504||excluded[actor.id]||names.count(actor.nick.data())!=0};
+            }
+            const auto choice=BRAim::choose(view,aimVec(s.position),range,s.id,candidates.data(),count);view.radius=radius;
+            if(choice.found) {
+                const auto &actor=actors[choice.index];uint64_t remote=0,ped=0;uint16_t id=0;float hp=0,physicalHP=0;uint32_t state=0;V3 root{};
+                if(read(s.pool+8+uint64_t(actor.id)*8,remote)&&remote==actor.remote&&read(remote+0x10,ped)&&ped==actor.ped&&
+                   read(remote+0x4a,id)&&id==actor.id&&read(remote+0x148,hp)&&read(ped+0x4b0,physicalHP)&&read(ped+0x494,state)&&
+                   BRAim::living(hp,physicalHP,state)&&read(ped+0x38,root)&&finite(root)) {
+                    const V3 point=aimPoint(actor,root,false);const double dx=point.x-s.position.x,dy=point.y-s.position.y,dz=point.z-s.position.z;
+                    V3 cameraPosition{};uint8_t activeCamera=0;
+                    if(dx*dx+dy*dy+dz*dz<=double(range)*range&&BRAim::score(view,aimVec(point))>=0&&
+                       read(s.base+0x22892a0+0x94,activeCamera)&&activeCamera<3&&
+                       read(s.base+0x22892a0+uint64_t(activeCamera)*0x1e8+0x334,cameraPosition)&&finite(cameraPosition)&&
+                       anchorAt(s.base,0x11b49c,0xd10443ffU)) {
+                        // Same line-clear query and flags used by the game's bullet path (b0c490).
+                        using Clear=bool(*)(const V3 *,const V3 *,bool,bool,bool,bool,bool,bool,bool);
+                        if(reinterpret_cast<Clear>(s.base+0x11b49c)(&cameraPosition,&point,true,true,false,true,false,false,false))selected=actor.id;
+                    }
+                }
+            }
+        }
+        const bool wasHeld=triggerState.ped==s.ped&&triggerState.target==selected&&triggerState.held;
+        if(triggerState.ped!=s.ped||triggerState.target!=selected)triggerState={s.ped,selected,now,frame,false,false};
+        triggerState.frame=frame;
+        const bool acquired=selected!=UINT16_MAX&&now-triggerState.acquired>=triggerDelayMs.load()/1000.0;
+        // Alternate held/released windows so semi-automatic weapons get an edge.
+        triggerState.held=acquired&&(uint64_t((now-triggerState.acquired)*1000)/80)%2==0;
+        triggerState.pressed=triggerState.held&&!wasHeld;
+        return triggerEnabled.load()?(pressed?triggerState.pressed:triggerState.held):0;
+    }
+}
+}
+extern "C" __attribute__((used,visibility("default")))
+int32_t BRMenuFireHeld20(void *pad,FireInput original) noexcept {return triggerInput(pad,original,false);}
+extern "C" __attribute__((used,visibility("default")))
+int32_t BRMenuFirePressed20(void *pad,FireInput original) noexcept {return triggerInput(pad,original,true);}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuLag20(uint64_t owner,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
+    const int interval=lagIntervalMs.load();if(interval<=0)return 1;
+    @autoreleasepool {
+        const uint64_t base=verifiedProjectionBase.load();
+        if(!base||caller!=base+0x92e5b4)return 1;
+        Local s;if(!liveConnected(s)||s.vehicle){lagSentAt.store(0);return 1;}
+        if(owner!=s.local)return 1;
+        // Gate before serialization and last-sent caching; do not mark dropped snapshots as sent.
+        const double now=NSProcessInfo.processInfo.systemUptime;
+        if(lagOwner.exchange(s.ped)!=s.ped)lagSentAt.store(0);
+        const uint64_t shots=ownShotEvents.load();const bool shot=lagShots.exchange(shots)!=shots;
+        double previous=lagSentAt.load();
+        if(shot||previous<=0||now<previous||now-previous>=interval/1000.0) {
+            lagSentAt.store(now);return 1;
+        }
+        return lagIntervalMs.load()>0?0:1;
+    }
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuStun20(uint64_t,uint64_t victim,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t) noexcept {
+    if(!antiFreezeEnabled.load())return 1;
+    @autoreleasepool {Local s;return !liveConnected(s)||victim!=s.ped?1:0;}
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuFreeze20(uint64_t owner,uint32_t controllable) noexcept {
+    if(!antiFreezeEnabled.load())return controllable;
+    @autoreleasepool {Local s;return liveConnected(s)&&owner==s.local?1:controllable;}
+}
+
+namespace {
+thread_local bool ownImpact21=false;
+uint64_t mainBase21() {
+    const mach_header *header=_dyld_get_image_header(0);if(!header||header->magic!=MH_MAGIC_64)return 0;
+    const uint8_t uuid[16]={0x3e,0x60,0x09,0x54,0xda,0x9e,0x31,0x16,0x9c,0xf2,0xbb,0xae,0xfe,0xdc,0x13,0x9c};
+    const uint8_t *p=reinterpret_cast<const uint8_t *>(header)+sizeof(mach_header_64);
+    for(uint32_t i=0;i<header->ncmds;++i){const load_command *c=reinterpret_cast<const load_command *>(p);if(c->cmdsize<8)return 0;
+        if(c->cmd==LC_UUID&&c->cmdsize==sizeof(uuid_command))return std::memcmp(reinterpret_cast<const uuid_command *>(p)->uuid,uuid,16)==0?reinterpret_cast<uint64_t>(header):0;p+=c->cmdsize;}
+    return 0;
+}
+void audioEvent21(NSString *name) {
+    dispatch_async(dispatch_get_main_queue(),^{[[NSNotificationCenter defaultCenter] postNotificationName:name object:nil];});
+}
+using Trace21=void(*)(void *,void *,const V3 *,const V3 *);
+using Impact21=void(*)(void *,void *,void *,const V3 *,const V3 *,void *,uint32_t);
+using Chat21=void(*)(const char *);
+}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuTrace21(void *weapon,void *owner,const V3 *from,const V3 *to,Trace21 original) noexcept {
+    if(!original)return;
+    V3 point{};uint8_t id=255;const bool redirect=read(reinterpret_cast<uint64_t>(weapon),id)&&adjustedShot21(owner,id,from,to,point);
+    if(redirect)aimRedirects.fetch_add(1,std::memory_order_relaxed);
+    original(weapon,owner,from,redirect?&point:to);
+}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuImpact21(void *weapon,void *owner,void *victim,const V3 *from,const V3 *to,void *collision,uint32_t damage,Impact21 original) noexcept {
+    if(!original)return;
+    {Local s;V3 point{};
+        if(liveConnected(s)&&reinterpret_cast<uint64_t>(owner)==s.ped&&to&&copy(reinterpret_cast<uint64_t>(to),&point,sizeof(point))&&destination(point)) {
+            const double distance=std::sqrt((point.x-s.position.x)*(point.x-s.position.x)+(point.y-s.position.y)*(point.y-s.position.y)+(point.z-s.position.z)*(point.z-s.position.z));
+            if(distance>1&&distance<1000){std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={s.ped,s.local,s.base,s.id,point,NSProcessInfo.processInfo.systemUptime};}
+        }
+    }
+    DamageScope24 damageScope(owner,victim,weapon);
+    const bool before=ownImpact21;ownImpact21=false;
+    if(customHitEnabled.load()){@autoreleasepool {Local s;ownImpact21=liveConnected(s)&&reinterpret_cast<uint64_t>(owner)==s.ped&&victim;}}
+    original(weapon,owner,victim,from,to,collision,damage);ownImpact21=before;
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuSound21(uint64_t,uint64_t entity,uint64_t event,uint64_t,uint64_t,uint64_t,uint64_t,uint64_t caller) noexcept {
+    const uint64_t base=verifiedProjectionBase.load();
+    if(!base)return 1;
+    if(customHitEnabled.load()&&ownImpact21&&caller==base+0xb0f410&&(event==0x3d||event==0x3e)) {audioEvent21(@"ReactHitSound21");return 0;}
+    if(customShotEnabled.load()&&caller==base+0xb0bb1c&&event==0x37) {
+        @autoreleasepool {Local s;uint32_t handle=0;if(liveConnected(s)&&read(s.ped+0x174,handle)&&entity==handle){audioEvent21(@"ReactShotSound21");return 0;}}
+    }
+    return 1;
+}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuWater24(uint64_t ped) noexcept {return waterDecision24(ped);}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuIncoming25(uint32_t color,const char *message) noexcept {(void)color;incomingEvent25(message);}
+extern "C" __attribute__((used,visibility("default")))
+uint32_t BRMenuLogo21() noexcept {return hideLogoEnabled.load()?0:1;}
+extern "C" __attribute__((used,visibility("default")))
+void BRMenuChat21(const char *input,Chat21 original) noexcept {
+    if(!original)return;
+    if(localCommandsEnabled.load()&&input) {
+        char buffer[12]{};const bool readable=copy(reinterpret_cast<uint64_t>(input),buffer,sizeof(buffer));
+        if(readable&&!std::strcmp(buffer,"/clearchat")){dispatch_async(dispatch_get_main_queue(),^{[[NSNotificationCenter defaultCenter] postNotificationName:@"ReactClearChat21" object:nil];});return;}
+    }
+    original(BRMenuChat19(input));
+}
+
+namespace {
+struct DisplayBalanceOwner21 {uint64_t base=0,info=0,ped=0;};
+DisplayBalanceOwner21 balanceOwner21;
+void updateDisplayBalance21() {
+    if(!NSThread.isMainThread)return;
+    const int64_t wanted=displayBalance21.load();const uint64_t base=verifiedProjectionBase.load();
+    if(balanceOwner21.info&&(wanted<0||balanceOwner21.base!=base)) {
+        uint64_t ped=0;int64_t real=0;
+        if(read(balanceOwner21.info,ped)&&ped==balanceOwner21.ped&&read(balanceOwner21.info+0x58,real)&&std::abs(double(real))<=99999999999.0)
+            (void)writeData(balanceOwner21.info+0x60,real);
+        balanceOwner21={};
+    }
+    if(wanted<0||!base||!anchorAt(base,0xf88f8,0xf9003269U))return;
+    uint16_t index=0;uint64_t ped=0,pool=0,local=0,own=0;int64_t real=0;
+    if(!read(base+0x31f17e8,index)||index>=1504||!read(base+0x340de18,pool)||!pool||!read(pool,local)||!local||!read(local+0x38,own)||!own)return;
+    const uint64_t info=base+0x31f17f0+uint64_t(index)*0xf8;
+    if(!read(info,ped)||ped!=own||!read(info+0x58,real)||std::abs(double(real))>99999999999.0)return;
+    // +58 is server-fed money; +60 is only its animated presentation counter (f88c0..f88f8).
+    // Actual money, transactions and RPC payloads remain untouched.
+    balanceOwner21={base,info,ped};(void)writeData(info+0x60,wanted);
+}
+void moveCamera21(const AimActor &target,double now) {
+    static double last=0;const double dt=last>0?std::clamp(now-last,0.001,0.05):1.0/60;last=now;
+    if(!regularAimEnabled.load())return;
+    Local s;Weapon weapon;uint16_t disabled=0;float hp=0;uint32_t state=0;V3 root{};
+    if(!liveConnected(s)||s.vehicle||!getWeapon(s,weapon)||!sameWeapon(s,weapon)||
+       !read(s.base+0x2ed1638+0x10e,disabled)||disabled||!read(target.ped+0x4b0,hp)||!read(target.ped+0x494,state)||
+       !BRAim::living(hp,hp,state)||!read(target.ped+0x38,root)||!finite(root))return;
+    using Aim=int32_t(*)(void *);if(!reinterpret_cast<Aim>(s.base+0xf7248)(reinterpret_cast<void *>(s.base+0x2ed1638)))return;
+    uint8_t active=0;if(!read(s.base+0x22892a0+0x94,active)||active>=3)return;
+    const uint64_t camera=s.base+0x22892a0+0x1a8+uint64_t(active)*0x1e8;
+    uint64_t owner=0;float alpha=0,beta=0;V3 position{},front{};
+    if(!read(camera+0x1c8,owner)||owner!=s.ped||!read(camera+0xac,alpha)||!read(camera+0xbc,beta)||!std::isfinite(alpha)||!std::isfinite(beta)||
+       !read(camera+0x18c,position)||!finite(position)||!read(camera+0x180,front)||!finite(front))return;
+    // Aiming cameras construct front=(-cos(beta)*cos(alpha),-sin(beta)*cos(alpha),sin(alpha)) at 9f878.
+    const V3 predicted{float(-std::cos(beta)*std::cos(alpha)),float(-std::sin(beta)*std::cos(alpha)),float(std::sin(alpha))};
+    if(predicted.x*front.x+predicted.y*front.y+predicted.z*front.z<0.9)return;
+    const V3 point=aimPoint(target,root,aimSettings.head);
+    if(regularAimVisible.load()) {
+        if(!anchorAt(s.base,0x11b49c,0xd10443ffU))return;
+        using Clear=bool(*)(const V3 *,const V3 *,bool,bool,bool,bool,bool,bool,bool);
+        if(!reinterpret_cast<Clear>(s.base+0x11b49c)(&position,&point,true,true,false,true,false,false,false))return;
+    }
+    const double dx=point.x-position.x,dy=point.y-position.y,dz=point.z-position.z;
+    float nextAlpha=0,nextBeta=0;
+    if(!React21::cameraStep(alpha,beta,dx,dy,dz,dt,aimSmoothSeconds.load(),nextAlpha,nextBeta)||!sameLocal(s))return;
+    (void)writeData(camera+0xac,nextAlpha);(void)writeData(camera+0xbc,nextBeta);
+}
+}
+
 @implementation BRPlayerSnapshot
++ (BOOL)clearNativeChat {
+    if(!NSThread.isMainThread)return NO;
+    const uint64_t base=imageBase();if(!base||!extensionBridgeReady(base)||
+       !anchorAt(base,0x57fe50,0xa9bf7bfdU)||!anchorAt(base,0x9efd4c,0xa9bb67faU)||!anchorAt(base,0x95f470,0xa9be4ff4U))return NO;
+    using Version=bool(*)();using Clear=void(*)();
+    // Exactly the two local renderers selected by the game's own clear-chat RPC at 95c510.
+    const bool classic=reinterpret_cast<Version>(base+0x57fe50)();
+    reinterpret_cast<Clear>(base+(classic?0x9efd4c:0x95f470))();return YES;
+}
++ (BOOL)clearChatForController:(NSObject *)controller {
+    if(!NSThread.isMainThread||!controller)return NO;
+    const uint64_t base=mainBase21();if(!base)return NO;
+    NSString *name=NSStringFromClass(controller.class);
+    const uint64_t field=[name isEqualToString:@"BrBase.ChatViewController"]?0x1b34c30:([name isEqualToString:@"BrBase.EventChatViewController"]?0x1b2afc8:0);
+    if(!field)return NO;
+    uint64_t offset=0,old=0,empty=0,count=0,emptyCount=1;
+    const uint64_t object=reinterpret_cast<uint64_t>((__bridge void *)controller);
+    if(!read(base+field,offset)||offset<16||offset+8>class_getInstanceSize(controller.class)||
+       !read(object+offset,old)||!old||!read(old+0x10,count)||count>100000||
+       !read(base+0x19b58d8,empty)||!empty||!read(empty+0x10,emptyCount)||emptyCount!=0)return NO;
+    using Retain=void *(*)(void *);using Release=void(*)(void *);
+    auto retain=reinterpret_cast<Retain>(dlsym(RTLD_DEFAULT,"swift_bridgeObjectRetain"));
+    auto release=reinterpret_cast<Release>(dlsym(RTLD_DEFAULT,"swift_bridgeObjectRelease"));
+    if(!retain||!release)return NO;
+    retain(reinterpret_cast<void *>(empty));
+    if(!writeData(object+offset,empty)){release(reinterpret_cast<void *>(empty));return NO;}
+    release(reinterpret_cast<void *>(old));return YES;
+}
++ (void)configureMedicine:(NSString *)command threshold:(double)threshold interval:(double)interval enabled:(BOOL)enabled {
+    if(!NSThread.isMainThread)return;
+    @synchronized(self) {
+        NSString *clean=[command stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+        const bool valid=[clean hasPrefix:@"/"]&&[clean lengthOfBytesUsingEncoding:NSUTF8StringEncoding]<128&&[clean rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location==NSNotFound;
+        const bool wanted=enabled&&valid&&std::isfinite(threshold)&&threshold>=1&&threshold<=99&&std::isfinite(interval)&&interval>=5&&interval<=120;
+        if(![medicineCommand22 isEqualToString:clean]||medicineEnabled22!=wanted)medicine22={};
+        medicineCommand22=[clean copy];medicineEnabled22=wanted;medicineThreshold22=threshold;medicineInterval22=interval;
+    }
+}
++ (void)tickVisuals {updateDisplayBalance21();}
++ (NSString *)extensionStatus {return extensionBridgeReady(imageBase())?@"Дополнительные настройки подключены":@"Нужен обновлённый IPA";}
++ (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules {
+    std::unordered_map<std::string,std::string> next;
+    for(NSString *key in rules) {
+        NSString *value=rules[key];if(![key isKindOfClass:NSString.class]||![value isKindOfClass:NSString.class])continue;
+        std::string a=key.UTF8String?:"",b=value.UTF8String?:"";
+        if(chatCommandToken(a)&&chatCommandToken(b))next[lowerCommand(a)]=b;
+        if(next.size()>=64)break;
+    }
+    std::lock_guard<std::mutex> lock(chatAliasMutex);chatAliases=std::move(next);
+}
++ (NSString *)sendChatCommand:(NSString *)command {
+    if(!NSThread.isMainThread)return @"Отправляй команду из меню";
+    const uint64_t base=imageBase();Local owner;
+    if(!extensionBridgeReady(base)||!getLocal(owner))return @"Открой игру и подключись к серверу";
+    if([command isEqualToString:@"/clearchat"]){[[NSNotificationCenter defaultCenter] postNotificationName:@"ReactClearChat21" object:nil];return @"Чат очищен локально";}
+    NSData *utf8=[command dataUsingEncoding:NSUTF8StringEncoding];
+    if(![command hasPrefix:@"/"]||utf8.length<2||utf8.length>512||[command rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location!=NSNotFound)return @"Некорректная команда";
+    // The verified exported routine immediately copies the UTF-8 string into its queued job.
+    using Send=void(*)(const char *);reinterpret_cast<Send>(base+0x3b60)(command.UTF8String);
+    return @"Команда отправлена";
+}
++ (uint64_t)ownShotCount { return ownShotEvents.load(std::memory_order_relaxed); }
 + (void)configureAspect:(double)scale {
     projectionScale.store(std::isfinite(scale)?float(std::clamp(scale,1.0,1.6)):1,std::memory_order_relaxed);
 }
@@ -706,7 +1175,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
     auto &settings=aimSettings;auto &view=settings.view;view.width=width;view.height=height;view.stretch=stretch;
     if(hasCamera)std::copy(std::begin(camera.v),std::end(camera.v),view.m.begin());
     aimHasChosen=false;double x=0,y=0;
-    if(settings.enabled&&hasCamera&&aimRange>0&&now-aimReceived<=0.3) {
+    if((settings.enabled||regularAimEnabled.load())&&hasCamera&&aimRange>0&&now-aimReceived<=0.3) {
         std::array<BRAim::Candidate,128> candidates{};
         for(size_t i=0;i<aimCount;++i) {
             const auto &a=aimActors[i];
@@ -717,6 +1186,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         if(selected.found) {aimChosen=aimActors[selected.index];aimHasChosen=true;}
 
     }
+    if(aimHasChosen&&regularAimEnabled.load())moveCamera21(aimChosen,now);
     if(aimHasChosen) {
         // Label above the selected actor; target itself can be chest or head.
         V3 p=aimPoint(aimChosen,aimChosen.root,true);p.z+=0.35f;
@@ -740,7 +1210,10 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
 
 + (void)stopControls {
     @synchronized(self) {
-        const Flight old=flight;flight={};assists={};cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
+        autoEvent25.store(false);stopChams24();waterWalk24.store(false);damageFactor24.store(1);
+        const Flight old=flight;flight={};restoreStrobe22();restoreHydraulics22();carTrack22={};rapid22={};collectSkeleton22.store(false);
+        medicineEnabled22=false;medicine22={};{std::lock_guard<std::mutex> lock(impactMutex22);impactPoint22={};}
+        assists={};runTrack={};displayBalance21.store(-1);updateDisplayBalance21();regularAimEnabled.store(false);customShotEnabled.store(false);customHitEnabled.store(false);hideLogoEnabled.store(false);localCommandsEnabled.store(false);triggerEnabled.store(false);antiFreezeEnabled.store(false);lagIntervalMs.store(0);lagSentAt.store(0);lagOwner.store(0);resetTrigger();desiredCameraFOV.store(0);desiredTime.store(-1);desiredWeather.store(-1);automaticAliases.store(false);cancelModelPending();cancelWaypoint(true);aimEnabled.store(false);resetAimTarget();projectionScale.store(1);
         Local s;
         if([NSThread isMainThread]&&getLocal(s)) {
             updatePedFlags(s);restoreVehicleGuard();restoreSpread();updateAnimations(s);
@@ -753,28 +1226,88 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
 + (void)configureControls:(NSDictionary<NSString *,NSNumber *> *)settings {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
+        autoEvent25.store(settings[@"autoEvent"].boolValue);
+        const bool extended=extensionBridgeReady(imageBase());
+        waterWalk24.store(settings[@"waterWalk"].boolValue&&waterBridge24(imageBase()));
+        const double damage=settings[@"damageFactor"].doubleValue;damageFactor24.store(settings[@"extraDamage"].boolValue&&std::isfinite(damage)?std::clamp(damage,1.0,5.0):1);
+        chamsWalls24.store(settings[@"chamsWalls"].boolValue);
+        chamsDistance24=std::clamp(settings[@"chamsDistance"].doubleValue,25.0,500.0);
+        uint32_t red=uint32_t(std::clamp(settings[@"chamsRed"].intValue,0,255)),green=uint32_t(std::clamp(settings[@"chamsGreen"].intValue,0,255)),blue=uint32_t(std::clamp(settings[@"chamsBlue"].intValue,0,255));
+        chamsColor24.store(red|(green<<8)|(blue<<16)|0xff000000U);
+        if(settings[@"chams"].boolValue)chamsEnabled24.store(true);else stopChams24();
+        regularAimEnabled.store(extended&&settings[@"regularAim"].boolValue);
+        const double smooth=settings[@"aimSmooth"].doubleValue;
+        aimSmoothSeconds.store(std::isfinite(smooth)?std::clamp(smooth,0.02,1.0):0.2);
+        regularAimVisible.store(settings[@"regularAimVisible"].boolValue);
+        customShotEnabled.store(extended&&settings[@"customShotSound"].boolValue);
+        customHitEnabled.store(extended&&settings[@"customHitSound"].boolValue);
+        hideLogoEnabled.store(extended&&settings[@"hideServerLogo"].boolValue);
+        localCommandsEnabled.store(extended);
+        const double balance=settings[@"visualBalanceValue"].doubleValue;
+        displayBalance21.store(extended&&settings[@"visualBalanceOverride"].boolValue&&std::isfinite(balance)?int64_t(std::clamp(balance,0.0,99999999999.0)):-1);
+        updateDisplayBalance21();
+
+        triggerEnabled.store(extended&&settings[@"triggerBot"].boolValue);
+        triggerRadius.store(std::clamp(settings[@"triggerRadius"].intValue,2,30));
+        triggerDelayMs.store(std::clamp(settings[@"triggerDelay"].intValue,0,500));
+        triggerAimOnly.store(settings[@"triggerAimOnly"].boolValue);
+        if(!triggerEnabled.load())resetTrigger();
+        const bool anti=extended&&settings[@"antiFreeze"].boolValue;
+        const bool previouslyAnti=antiFreezeEnabled.exchange(anti);
+        if(anti&&!previouslyAnti) {
+            Local s;uint8_t blocked=0;
+            if(liveConnected(s)&&read(s.local+0x1ec,blocked)&&(blocked&1)&&anchorAt(s.base,0x9533a8,0xd10543ffU)) {
+                const uint8_t enabled=1;struct RPC {const uint8_t *data;uint32_t bits;uint32_t padding;};const RPC rpc{&enabled,8,0};
+                using Toggle=void(*)(const RPC *);reinterpret_cast<Toggle>(s.base+0x9533a8)(&rpc);
+            }
+        }
+        const int interval=extended&&settings[@"fakeLag"].boolValue?std::clamp(settings[@"lagInterval"].intValue,50,500):0;
+        if(lagIntervalMs.exchange(interval)!=interval){lagSentAt.store(0);lagOwner.store(0);}
+
+        const double fov=settings[@"cameraFOV"].doubleValue;
+        desiredCameraFOV.store(extended&&settings[@"cameraFOVOverride"].boolValue&&std::isfinite(fov)?float(std::clamp(fov,50.0,120.0)):0);
+        const int hour=settings[@"worldHour"].intValue,minute=settings[@"worldMinute"].intValue,weather=settings[@"worldWeather"].intValue;
+        desiredTime.store(extended&&settings[@"worldTimeOverride"].boolValue?std::clamp(hour,0,23)*60+std::clamp(minute,0,59):-1);
+        desiredWeather.store(extended&&settings[@"worldWeatherOverride"].boolValue?std::clamp(weather,0,21):-1);
+        automaticAliases.store(extended&&settings[@"aliasesAuto"].boolValue);
+        collectSkeleton22.store(settings[@"espSkeleton"].boolValue||settings[@"espSilhouette"].boolValue);
+        assists.vehicleAcceleration=settings[@"vehicleAcceleration"].boolValue;assists.launchAssist=settings[@"launchAssist"].boolValue;assists.strobe=settings[@"vehicleStrobe"].boolValue;assists.hydraulics=settings[@"vehicleHydraulics"].boolValue;
+        if(!assists.hydraulics)restoreHydraulics22();
+        const double acceleration=settings[@"accelerationFactor"].doubleValue;assists.accelerationFactor=std::isfinite(acceleration)?std::clamp(acceleration,1.0,5.0):2;
+        if(!assists.strobe)restoreStrobe22();
         assists.health=settings[@"autoHealth"].boolValue;assists.armor=settings[@"autoArmor"].boolValue;
         assists.stamina=settings[@"stamina"].boolValue;assists.vehicleHealth=settings[@"autoVehicleHealth"].boolValue;
         assists.slowFall=settings[@"slowFall"].boolValue;assists.noClip=settings[@"noClip"].boolValue;
         assists.proof=settings[@"localProof"].boolValue;assists.noFall=settings[@"noFall"].boolValue;
         assists.vehicleProof=settings[@"vehicleProof"].boolValue;assists.ammo=settings[@"infiniteAmmo"].boolValue;
         assists.noCollision=settings[@"noCollision"].boolValue;assists.noSpread=settings[@"noSpread"].boolValue;
+        assists.runSpeed=settings[@"runSpeed"].boolValue;
+        const double runFactor=settings[@"runMultiplier"].doubleValue;
+        assists.runMultiplier=std::isfinite(runFactor)?std::clamp(runFactor,1.0,3.0):1.5;
+        if(!assists.runSpeed)runTrack={};
         assists.noAnim=settings[@"noAnim"].boolValue;assists.fastAnim=settings[@"fastAnim"].boolValue;
         const double animationRate=settings[@"animationRate"].doubleValue;
         assists.animationRate=std::isfinite(animationRate)?std::clamp(animationRate,1.0,4.0):2;
         assists.magazine=settings[@"noReload"].boolValue;assists.rapid=settings[@"rapidFire"].boolValue;
-        const double rate=settings[@"fireRate"].doubleValue;assists.fireRate=std::isfinite(rate)?std::clamp(rate,1.0,5.0):2.0;
+        const double rate=settings[@"fireRate"].doubleValue;assists.fireRate=std::isfinite(rate)?std::clamp(rate,1.0,15.0):2.0;
         Local s;if(getLocal(s)){updatePedFlags(s);updateVehicleGuard(s);updateSpread(s);updateAnimations(s);}else if(!assists.noSpread)restoreSpread();
     }
 }
 + (void)tickControls:(double)elapsed {
     if(![NSThread isMainThread])return;
     @synchronized(self) {
+        if(medicineEnabled22) {
+            Local local;float hp=0;uint32_t state=0;
+            const bool valid=liveConnected(local)&&read(local.ped+0x4b0,hp)&&read(local.ped+0x494,state)&&BRAim::living(hp,hp,state);
+            if(medicine22.due(NSProcessInfo.processInfo.systemUptime,valid?local.ped:0,hp,medicineThreshold22,medicineInterval22,valid))
+                (void)[self sendChatCommand:medicineCommand22];
+        }
+        tickChams24();
         tickModels();
         tickWaypoint();
         tickAimContext();
         if(!flight.active&&!assists.health&&!assists.armor&&!assists.stamina&&!assists.vehicleHealth&&!assists.slowFall&&
-           !assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
+           !assists.vehicleAcceleration&&!assists.launchAssist&&!assists.strobe&&!assists.hydraulics&&!hydraulic22.active&&!strobe22.active&&!assists.runSpeed&&!assists.noCollision&&!assists.noSpread&&!assists.noAnim&&!assists.fastAnim&&!spreadBackup.info&&animationState.entries.empty()&&!assists.proof&&!assists.noFall&&!assists.vehicleProof&&!assists.ammo&&!assists.magazine&&!assists.rapid&&!pedFlags.ped&&!vehicleGuard.active)return;
         Local s;
         if(!std::isfinite(elapsed)||elapsed<=0||elapsed>0.25||!getLocal(s)) {flight={};return;}
         updatePedFlags(s);updateVehicleGuard(s);weaponAssists(s);updateSpread(s);updateAnimations(s);
@@ -784,6 +1317,8 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         const bool staminaVerified=read(s.base+0x9d2ad0,staminaAnchor)&&staminaAnchor==0xbd088260U;
         float health=0;
         const bool alive=pedVerified&&read(s.ped+0x4b0,health)&&std::isfinite(health)&&health>0&&health<=10000;
+        updateRunSpeed(s,elapsed,alive&&!waypointJob.active);
+        updateCar22(s,elapsed,alive);
         if(alive&&sameLocal(s)) {
             const float hundred=100;
             if(assists.health&&health<100)(void)writeData(s.ped+0x4b0,hundred);
@@ -833,8 +1368,9 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         Weapon weapon{};const bool hasWeapon=getWeapon(s,weapon);
         float gravity=0;(void)read(s.ped+0x170,gravity);
         uint16_t carID=0;if(s.vehicle)(void)read(s.vehicle+0x434,carID);
+        uint32_t lifeState=0,connection=0;(void)read(s.ped+0x494,lifeState);(void)read(s.base+0x340de10,connection);
         uint32_t skin=0,carModel=0;(void)read(s.ped+0x98,skin);if(s.vehicle)(void)read(s.vehicle+0x98,carModel);
-        return @{@"modelStatus":modelStatus,@"skin":@(skin),@"carModel":@(carModel),@"modelPending":@(modelPending.action!=ModelAction::None),@"weapon":@(hasWeapon?int(weapon.id):-1),@"clip":@(hasWeapon?weapon.clip:-1),@"ammo":@(hasWeapon?weapon.total:-1),
+        return @{@"waterBridge":@(waterBridge24(s.base)),@"chamsActive":@(chamsActive24.load()),@"chamsDraws":@(chamsDraws24.load()),@"connected":@(connection==14),@"alive":@(BRAim::living(health,health,lifeState)),@"owner":@(s.ped),@"modelStatus":modelStatus,@"skin":@(skin),@"carModel":@(carModel),@"modelPending":@(modelPending.action!=ModelAction::None),@"weapon":@(hasWeapon?int(weapon.id):-1),@"clip":@(hasWeapon?weapon.clip:-1),@"ammo":@(hasWeapon?weapon.total:-1),
             @"capacity":@(hasWeapon?int(weapon.capacity):-1),@"carID":@(s.vehicle?int(carID):-1),@"gravity":@(std::isfinite(gravity)?gravity:0),
             @"vehicleProtected":@(vehicleGuard.active),@"flightActive":@(flight.active),@"id":@(s.id),@"x":@(s.position.x),@"y":@(s.position.y),@"z":@(s.position.z),
             @"hp":@(std::isfinite(health)?health:-1),@"armor":@(std::isfinite(armor)?armor:-1),
@@ -859,9 +1395,30 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         static double lastAction=-100;
         const double now=NSProcessInfo.processInfo.systemUptime;
         if(now-lastAction<0.4)return @"Подожди перед следующей командой";
+        if([action isEqualToString:@"reconnect"]) {
+            const uint64_t base=imageBase();uint32_t state=0;uint64_t peer=0;uint16_t port=0;std::array<char,256> host{};
+            if(!base||!anchorAt(base,0x9353ac,0xd10143ffU)||!anchorAt(base,0x9354f4,0x94000179U)||
+               !read(base+0x340de10,state)||(state!=14&&state!=4&&state!=5)||!read(base+0x340de08,peer)||!peer||
+               !read(base+0x340df78,port)||!port||!copy(base+0x340de78,host.data(),host.size())||!host[0]||!std::memchr(host.data(),0,host.size()))return @"Текущее подключение ещё не готово к повторному входу";
+            [self stopControls];using Retry=void(*)(uint32_t,uint32_t);reinterpret_cast<Retry>(base+0x9353ac)(100,2000);lastAction=now;
+            return @"Повторное подключение к текущему серверу запущено";
+        }
         Local s;if(!getLocal(s))return @"Персонаж не найден или сборка клиента не совпадает";
         if(waypointJob.active)return @"Дождись телепорта по метке или отмени его";
         if([action isEqualToString:@"waypoint"]) {lastAction=now;return beginWaypoint(s);}
+        if([action isEqualToString:@"land"]) {
+            if(s.vehicle)return @"Для возврата на землю выйди из транспорта";
+            float hp=0;uint32_t life=0;uint8_t found=0;
+            if(!read(s.ped+0x4b0,hp)||!read(s.ped+0x494,life)||!BRAim::living(hp,hp,life)||!anchorAt(s.base,0x11f89c,0xd10203ffU))return @"Персонаж ещё не готов";
+            using Ground=float(*)(float,float,float,uint8_t *);
+            const float height=reinterpret_cast<Ground>(s.base+0x11f89c)(s.position.x,s.position.y,std::min(4999.f,s.position.z+0.5f),&found);
+            if(found!=1||!std::isfinite(height)||height<-500||height>s.position.z+0.5f)return @"Поверхность снизу ещё не загружена";
+            V3 point{s.position.x,s.position.y,height+1.f};if(!destination(point))return @"Поверхность вне допустимых границ";
+            const Flight previous=flight;flight={};updatePedFlags(s);
+            NSString *result=teleport(s,point);
+            if(![result isEqualToString:@"Локальная команда телепорта выполнена"]){flight=previous;updatePedFlags(s);return result;}
+            const V3 zero{};(void)writeData(s.ped+0x180,zero);lastAction=now;return @"Персонаж возвращён на поверхность";
+        }
         if([action isEqualToString:@"flightToggle"]) {
             if(flight.active) {
                 const Flight old=flight;flight={};
@@ -935,7 +1492,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
         }
         if([action isEqualToString:@"skinSet"]||[action isEqualToString:@"carSet"]||[action isEqualToString:@"weaponGive"]) {
             double id=values[@"id"].doubleValue,ammo=values[@"ammo"].doubleValue;
-            if(!std::isfinite(id)||id<0||id>1000000||id!=std::floor(id))return @"Некорректный ID модели";
+            if(!std::isfinite(id)||id<0||id>UINT32_MAX||id!=std::floor(id))return @"Некорректный ID модели";
             if([action isEqualToString:@"weaponGive"]&&(!std::isfinite(ammo)||ammo<1||ammo>99999||ammo!=std::floor(ammo)))return @"Патроны: 1–99999";
             lastAction=now;
             ModelAction kind=[action isEqualToString:@"skinSet"]?ModelAction::Skin:([action isEqualToString:@"carSet"]?ModelAction::Car:ModelAction::Weapon);
@@ -1009,6 +1566,31 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
             if(!liveVehicle(chosen))return @"Транспорт сменился";
             point.z+=2;lastAction=now;return teleport(s,point);
         }
+        if([action isEqualToString:@"teleportImpact"]) {
+            ImpactPoint22 point{};{std::lock_guard<std::mutex> lock(impactMutex22);point=impactPoint22;}
+            if(!point.ped||point.ped!=s.ped||point.local!=s.local||point.id!=s.id||point.base!=s.base||now-point.time>30)return @"Нет свежего собственного попадания за последние 30 секунд";
+            V3 target=point.point;target.z+=1;lastAction=now;return teleport(s,target);
+        }
+        if([action isEqualToString:@"launchActivate"]) {
+            VehicleRef ref{};uint64_t driver=0;uint32_t kind=99;
+            if(!s.vehicle||!vehicleRef(s.base,s.vehicle,ref)||!read(s.vehicle+0x2f0,driver)||driver!=s.ped||!read(s.vehicle+0x430,kind)||kind!=0||!anchorAt(s.base,0x593880,0xa9bf7bfdU))return @"Сначала сядь за руль автомобиля";
+            using Launch=void(*)();reinterpret_cast<Launch>(s.base+0x593880)();lastAction=now;
+            return @"Штатный Launch Control активирован";
+        }
+        if([action isEqualToString:@"vehicleColor"]) {
+            VehicleRef ref{};uint64_t driver=0;const int primary=values[@"primary"].intValue,secondary=values[@"secondary"].intValue;
+            if(primary<0||primary>255||secondary<0||secondary>255)return @"Цвета: ID палитры от 0 до 255";
+            if(!s.vehicle||!vehicleRef(s.base,s.vehicle,ref)||!read(s.vehicle+0x2f0,driver)||driver!=s.ped||!liveVehicle(ref)||!anchorAt(s.base,0x94473c,0xf9400008U))return @"Сначала сядь за руль";
+            using Color=void(*)(void *,uint32_t,uint32_t);reinterpret_cast<Color>(s.base+0x94473c)(reinterpret_cast<void *>(ref.net),primary,secondary);
+            lastAction=now;return @"Цвет автомобиля изменён локально";
+        }
+        if([action isEqualToString:@"hydraulicHop"]) {
+            VehicleRef ref{};uint64_t driver=0;V3 velocity{};uint32_t kind=99;
+            if(!s.vehicle||!vehicleRef(s.base,s.vehicle,ref)||!read(s.vehicle+0x2f0,driver)||driver!=s.ped||!read(s.vehicle+0x430,kind)||kind!=0||!read(s.vehicle+0x180,velocity)||!finite(velocity))return @"Сначала сядь за руль автомобиля";
+            if(std::abs(velocity.z)>0.08f||std::hypot(velocity.x,velocity.y)>0.5f)return @"Подброс доступен на небольшой скорости и у земли";
+            velocity.z=0.12f;if(!sameLocal(s)||!liveVehicle(ref)||!writeData(s.vehicle+0x180,velocity))return @"Транспорт сменился";
+            lastAction=now;return @"Подброс автомобиля выполнен";
+        }
         if([action isEqualToString:@"repairVehicle"]) {
             VehicleRef ref{};float hp=0;uint32_t kind=0;uint64_t model=0,clump=0;uint8_t type=0;
             if(!s.vehicle)return @"Сначала сядь в транспорт";
@@ -1054,6 +1636,14 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
             float vertical=static_cast<float>(0.18*power);
             if(!sameLocal(s)||!writeData(s.ped+0x188,vertical))return @"Не удалось задать прыжок";
             lastAction=now;return @"Задан вертикальный импульс";
+        }
+        if([action isEqualToString:@"launchUp"]||[action isEqualToString:@"launchDown"]) {
+            if(s.vehicle)return @"Для подброса выйди из транспорта";
+            const double power=values[@"power"].doubleValue;float hp=0;uint32_t life=0;
+            if(!std::isfinite(power)||power<1||power>5||!read(s.ped+0x4b0,hp)||!read(s.ped+0x494,life)||!BRAim::living(hp,hp,life)||!sameLocal(s))return @"Персонаж ещё не готов";
+            const float vertical=float(([action isEqualToString:@"launchUp"]?1:-1)*0.18*power);
+            if(!writeData(s.ped+0x188,vertical))return @"Не удалось изменить вертикальную скорость";
+            lastAction=now;return [action isEqualToString:@"launchUp"]?@"Подброс вверх выполнен":@"Импульс вниз выполнен";
         }
         if([action isEqualToString:@"massPed"]||[action isEqualToString:@"massVehicle"]||[action isEqualToString:@"massReset"]) {
             if([action isEqualToString:@"massReset"]) {
@@ -1145,7 +1735,7 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
             read(base+0x22892a0+uint64_t(activeCamera)*0x1e8+0x334,cameraPosition)&&finite(cameraPosition);
         int32_t pluginOffset=0;
         const bool hasPlugin=read(base+0x3408860+4,pluginOffset)&&pluginOffset>=-0x10000&&pluginOffset<=0x10000;
-        struct Shape {uint64_t ped=0;bool valid=false;V3 bone{},lo{},hi{};};
+        struct Shape {uint64_t ped=0;bool valid=false;V3 bone{},lo{},hi{};std::vector<V3> joints;std::vector<int16_t> parents;};
         static std::array<Shape,1504> shapes{};static uint64_t shapePool=0;
         if(shapePool!=pool){shapes={};shapePool=pool;}
         NSMutableArray *result=[NSMutableArray array];size_t streamed=0,approximate=0;
@@ -1200,6 +1790,18 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
                                finite(relLo)&&finite(relHi)&&std::abs(relLo.x)<4&&std::abs(relHi.x)<4&&
                                std::abs(relLo.y)<4&&std::abs(relHi.y)<4&&std::abs(relLo.z)<4&&std::abs(relHi.z)<4) {
                                 shape.lo=relLo;shape.hi=relHi;shape.valid=true;shape.bone=first;fresh=true;
+                                if(collectSkeleton22.load()) {
+                                    uint64_t info=0;std::array<uint8_t,256*24> nodeData{};std::array<uint32_t,256> flags{};std::array<int16_t,256> parents{};
+                                    bool validNodes=anchorAt(base,0x8dceb0,0xf9000e60U)&&read(hierarchy+0x18,info)&&info&&copy(info,nodeData.data(),size_t(nodes)*24);
+                                    std::vector<V3> joints; joints.reserve(nodes);
+                                    for(int i=0;validNodes&&i<nodes;++i) {
+                                        const int32_t index=field<int32_t>(nodeData.data(),i*24+4);flags[i]=field<uint32_t>(nodeData.data(),i*24+8);
+                                        if(index<0||index>=nodes){validNodes=false;break;}
+                                        V3 point{bones[index].v[12]-root.x,bones[index].v[13]-root.y,bones[index].v[14]-root.z};
+                                        if(!finite(point)||std::abs(point.x)>4||std::abs(point.y)>4||std::abs(point.z)>4){validNodes=false;break;}joints.push_back(point);
+                                    }
+                                    if(validNodes&&React22::boneParents(flags.data(),nodes,parents.data())){shape.joints=std::move(joints);shape.parents.assign(parents.begin(),parents.begin()+nodes);}else{shape.joints.clear();shape.parents.clear();}
+                                }
                             }
                         }
                     }
@@ -1224,7 +1826,14 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
                 if(utf8)std::strncpy(candidate.nick.data(),utf8,candidate.nick.size()-1);
                 candidates[candidateCount++]=candidate;
             }
-            [result addObject:@{@"id":@(slot),@"name":name,@"hp":@(health),@"armor":@(armor),@"distance":@(distance),@"approx":@(approx),
+            NSMutableArray *segments=[NSMutableArray array];
+            if(collectSkeleton22.load()&&shape.joints.size()==shape.parents.size())for(size_t i=0;i<shape.joints.size()&&segments.count<128;++i){
+                const int parent=shape.parents[i];if(parent<0||size_t(parent)>=shape.joints.size())continue;
+                const V3 a=shape.joints[parent],b=shape.joints[i];const float length=std::sqrt((a.x-b.x)*(a.x-b.x)+(a.y-b.y)*(a.y-b.y)+(a.z-b.z)*(a.z-b.z));
+                if(length<0.025f||length>1.5f)continue;
+                [segments addObject:@[@(root.x+a.x),@(root.y+a.y),@(root.z+a.z),@(root.x+b.x),@(root.y+b.y),@(root.z+b.z)]];
+            }
+            [result addObject:@{@"segments":segments,@"id":@(slot),@"name":name,@"hp":@(health),@"armor":@(armor),@"distance":@(distance),@"approx":@(approx),
                 @"bounds":@[@(root.x+lo.x),@(root.y+lo.y),@(root.z+lo.z),@(root.x+hi.x),@(root.y+hi.y),@(root.z+hi.z)]}];
         }
         {std::lock_guard<std::mutex> lock(aimMutex);aimActors=candidates;aimCount=candidateCount;aimReceived=NSProcessInfo.processInfo.systemUptime;}
@@ -1234,3 +1843,6 @@ float BRMenuAspectHook17(float naturalAspect) noexcept {
     }
 }
 @end
+
+
+

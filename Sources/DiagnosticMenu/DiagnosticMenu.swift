@@ -2,10 +2,12 @@ import UIKit
 import Darwin
 import GLKit
 import QuartzCore
+import AVFoundation
+import UniformTypeIdentifiers
 
 /// Local diagnostics for an app you control. Install on the main actor.
 @MainActor
-public final class DiagnosticMenu: NSObject {
+public final class DiagnosticMenu: NSObject, UIGestureRecognizerDelegate, UIDocumentPickerDelegate {
     private weak var scene: UIWindowScene?
     private weak var appWindow: UIWindow?
     private var window: UIWindow?
@@ -20,6 +22,10 @@ public final class DiagnosticMenu: NSObject {
     public var projectionProvider: (() -> [Double])?
     public var aspectConfigurationProvider: ((Double) -> Void)?
     public var aspectStateProvider: (() -> [String: Any])?
+    public var medicineConfigurationProvider: ((String, Double, Double, Bool) -> Void)?
+    public var clearNativeChatProvider: (() -> Bool)?
+    public var visualTickProvider: (() -> Void)?
+    public var clearChatControllerProvider: ((NSObject) -> Bool)?
     public var aimFrameProvider: ((Double, Double, Double) -> [String: Any])?
     public var aimConfigurationProvider: ((Bool, Double, Double, Bool, String) -> Void)?
     private var lastAimState: [String: Any] = [:]
@@ -39,6 +45,17 @@ public final class DiagnosticMenu: NSObject {
 
     private var coordinateText = "Позиция: источник не найден"
     private var gestures: [UITapGestureRecognizer] = []
+    public var commandSendProvider: ((String) -> String)?
+    public var commandAliasesConfigurationProvider: ((String) -> Void)?
+    public var extensionStatusProvider: (() -> String)?
+    public var shotEventProvider: (() -> UInt64)?
+    private var lastShotEvent: UInt64?
+    private let shotAudio = ReactShotAudio(kind: "shot")
+    private let hitAudio = ReactShotAudio(kind: "hit")
+    private let hostUI = ReactHostUI()
+    private let performance25 = ReactPerformance25()
+    private var event25 = ReactEvent25()
+    private var importingHitSound = false
     private var dragOrigin: CGPoint?
     private var timer: Timer?
     private var link: CADisplayLink?
@@ -57,6 +74,7 @@ public final class DiagnosticMenu: NSObject {
         appWindow = scene.windows.first(where: { $0.isKeyWindow })
             ?? scene.windows.first(where: { $0.windowLevel == .normal })
         UIDevice.current.isBatteryMonitoringEnabled = true
+        lastShotEvent = shotEventProvider?()
         let overlay = PassthroughWindow(windowScene: scene)
         overlay.windowLevel = .alert + 1
         overlay.backgroundColor = .clear
@@ -79,17 +97,7 @@ public final class DiagnosticMenu: NSObject {
             self.dragOrigin = CGPoint(x: origin.x + delta.x, y: origin.y + delta.y)
             self.placeWindow()
         }
-        for targetWindow in ([appWindow, overlay] as [UIWindow?]) {
-            guard let targetWindow else { continue }
-            let gesture = UITapGestureRecognizer(target: self, action: #selector(toggleMenu))
-            gesture.numberOfTouchesRequired = 3
-            gesture.numberOfTapsRequired = 2
-            gesture.cancelsTouchesInView = false
-            gesture.delaysTouchesBegan = false
-            gesture.delaysTouchesEnded = false
-            targetWindow.addGestureRecognizer(gesture)
-            gestures.append(gesture)
-        }
+        refreshGestureWindows()
         host.loadViewIfNeeded()
         placeWindow()
         overlay.isHidden = false // Does not take keyboard focus from the host app.
@@ -99,15 +107,20 @@ public final class DiagnosticMenu: NSObject {
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.updateMetrics() }
         }
+        NotificationCenter.default.addObserver(self, selector: #selector(replacementShot), name: Notification.Name("ReactShotSound21"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(replacementHit), name: Notification.Name("ReactHitSound21"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(serverMessage25(_:)), name: Notification.Name("ReactServerMessage25"), object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(clearLocalChat), name: Notification.Name("ReactClearChat21"), object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(background), name: UIScene.didEnterBackgroundNotification, object: scene)
         NotificationCenter.default.addObserver(self, selector: #selector(foreground), name: UIScene.didActivateNotification, object: scene)
-        append("Меню v17 подключено")
+        append("React Modifications подключено")
         configureControls(); updateMetrics()
     }
 
     /// Call when disconnecting the scene; releases CADisplayLink's target reference.
     public func uninstall() {
         controlStopProvider?()
+        shotAudio.stop(); hitAudio.stop(); hostUI.restore(); performance25.restore(); event25.reset(); lastShotEvent = nil
         restoreStretch()
         espGeneration += 1
         timer?.invalidate(); timer = nil
@@ -135,14 +148,63 @@ public final class DiagnosticMenu: NSObject {
         host.refreshLog()
     }
 
+
+    /// Rebind after the launcher/game replaces its normal UIWindow.
+    private func refreshGestureWindows() {
+        guard let scene else { return }
+        let candidates = scene.windows.filter { !$0.isHidden && ($0.windowLevel == .normal || $0 === window) }
+        gestures.removeAll { recognizer in
+            guard let attached = recognizer.view as? UIWindow,
+                  candidates.contains(where: { $0 === attached }) else {
+                recognizer.view?.removeGestureRecognizer(recognizer); return true
+            }
+            return false
+        }
+        if let active = candidates.first(where: { $0.isKeyWindow && $0 !== window })
+            ?? candidates.first(where: { $0.windowLevel == .normal }) { appWindow = active }
+        for target in candidates where !gestures.contains(where: { $0.view === target }) {
+            let gesture = UITapGestureRecognizer(target: self, action: #selector(toggleMenu))
+            gesture.numberOfTouchesRequired = 3; gesture.numberOfTapsRequired = 2
+            gesture.delegate = self; gesture.cancelsTouchesInView = false
+            gesture.delaysTouchesBegan = false; gesture.delaysTouchesEnded = false
+            gesture.requiresExclusiveTouchType = false
+            target.addGestureRecognizer(gesture); gestures.append(gesture)
+        }
+    }
+    public func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                                  shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer) -> Bool { true }
     @objc private func toggleMenu() { perform("collapse") }
-    @objc private func background() { restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
+    @objc private func serverMessage25(_ notification: Notification) {
+        guard let text = notification.userInfo?["text"] as? String,
+              let received = notification.userInfo?["received"] as? Double else { return }
+        let enabled = MenuPreferences.shared.flag("autoEvent")
+        let connected = (localStateProvider?()["connected"] as? NSNumber)?.boolValue ?? false
+        if event25.consume(text, now: ProcessInfo.processInfo.systemUptime, received: received,
+                           enabled: enabled, foreground: scene?.activationState == .foregroundActive, connected: connected) {
+            host.actionStatus.text = commandSendProvider?("/gevent") ?? "Источник команд не подключён"
+            append("Авто-МП: /gevent")
+        }
+    }
+    @objc private func replacementShot() { if MenuPreferences.shared.flag("customShotSound"), scene?.activationState == .foregroundActive { shotAudio.play() } }
+    @objc private func replacementHit() { if MenuPreferences.shared.flag("customHitSound"), scene?.activationState == .foregroundActive { hitAudio.play() } }
+    @objc private func clearLocalChat() {
+        guard let scene else { return }
+        let nativeCleared = clearNativeChatProvider?() ?? false
+        let count = hostUI.clearChat(in: scene, clear: clearChatControllerProvider)
+        host.actionStatus.text = nativeCleared || count > 0 ? "Чат очищен" : "Окно игрового чата ещё не найдено"
+    }
+    @objc private func background() { shotAudio.stop(); hitAudio.stop(); hostUI.restore(); performance25.restore(); event25.reset(); lastShotEvent = nil; restoreStretch(); controlStopProvider?(); controlTimestamp = 0; link?.isPaused = true; append("Приложение в фоне") }
     @objc private func foreground() {
         sampledController = nil; sampledTime = 0; gameRate = nil
         frames = 0; previousTimestamp = 0; sampleStart = 0; refreshRate = 0; controlTimestamp = 0
         configureControls(); link?.isPaused = false; placeWindow(); append("Возврат в приложение")
     }
     @objc private func tick(_ display: CADisplayLink) {
+        if let scene, scene.activationState == .foregroundActive {
+            visualTickProvider?()
+            performance25.update(in: scene, enabled: MenuPreferences.shared.flag("fpsUp"))
+            hostUI.update(in: scene, balance: MenuPreferences.shared.flag("visualBalance") ? MenuPreferences.shared.visualBalance : nil)
+        }
         if scene?.activationState == .foregroundActive, MenuPreferences.shared.needsPlayers {
             refreshPlayers()
             let matrix = projectionProvider?() ?? []
@@ -151,7 +213,7 @@ public final class DiagnosticMenu: NSObject {
             decor.renderESP()
         } else { decor.hideESP() }
         let prefs = MenuPreferences.shared
-        if prefs.flag("silentAim"), scene?.activationState == .foregroundActive {
+        if (prefs.flag("silentAim") || prefs.flag("triggerBot") || prefs.flag("regularAim")), scene?.activationState == .foregroundActive {
             lastAimState = aimFrameProvider?(Double(decor.bounds.width), Double(decor.bounds.height), Double(decor.horizontalScale)) ?? [:]
             decor.updateAim(lastAimState)
         } else { decor.hideAim(); lastAimState = [:] }
@@ -194,17 +256,14 @@ public final class DiagnosticMenu: NSObject {
         host.view.setNeedsLayout()
     }
     private func updateMetrics() {
+        refreshGestureWindows()
         placeWindow()
         sampleGameRate()
         applyStretch()
+        host.extensionStatus.text = extensionStatusProvider?() ?? ""
         if MenuPreferences.shared.flag("silentAim") {
-            let status = lastAimState["status"] as? String ?? "Ожидание источника наведения"
-            let callbacks = (lastAimState["callbacks"] as? NSNumber)?.uint64Value ?? 0
-            let redirects = (lastAimState["redirects"] as? NSNumber)?.uint64Value ?? 0
-            let skipped = (lastAimState["skipped"] as? NSNumber)?.uint64Value ?? 0
             let candidates = (lastAimState["candidates"] as? NSNumber)?.intValue ?? 0
-            let range = (lastAimState["range"] as? NSNumber)?.doubleValue ?? 0
-            host.aimStatus.text = "\(status)\nВызовы: \(callbacks) · перенаправлено: \(redirects) · пропущено: \(skipped)\nИгроков: \(candidates) · дальность оружия: \(Int(range))"
+            host.aimStatus.text = "Целей: \(candidates)"
         } else { host.aimStatus.text = "Silent Aim выключен" }
         if let position = coordinateProvider?() { setLocalCoordinates(x: position.x, y: position.y, z: position.z) }
         else if let state = localStateProvider?(), let x = state["x"] as? NSNumber,
@@ -235,7 +294,7 @@ public final class DiagnosticMenu: NSObject {
         let charge = battery < 0 ? "недоступно" : "\(Int(battery * 100))%"
         let maxHz = scene?.screen.maximumFramesPerSecond ?? 0
         let fps = gameRate.map { String(format: "%.0f FPS GLK", $0) } ?? "FPS GLK: ожидание"
-        host.metrics.text = "\(fps)  •  UI \(Int(refreshRate)) Гц\nRAM \(memory)  •  Заряд \(charge)\nНагрев: \(thermalName())  •  Экран \(maxHz) Гц"
+        host.metrics.text = "\(performance25.status)\n\(fps)  •  UI \(Int(refreshRate)) Гц\nRAM \(memory)  •  Заряд \(charge)\nНагрев: \(thermalName())  •  Экран \(maxHz) Гц"
         host.coordinates.text = coordinateText
         decor.update(text: "\(fps)   •   \(memory)\n\(coordinateText)", insets: appWindow?.safeAreaInsets ?? .zero)
 
@@ -253,7 +312,7 @@ public final class DiagnosticMenu: NSObject {
         espBusy = true
         let generation = espGeneration
         let statusProvider = playerStatusProvider
-        let walls = MenuPreferences.shared.flag("espWalls", fallback: true) || MenuPreferences.shared.flag("silentAim")
+        let walls = MenuPreferences.shared.flag("espWalls", fallback: true) || MenuPreferences.shared.flag("silentAim") || MenuPreferences.shared.flag("regularAim")
         let maxDistance = MenuPreferences.shared.maxDistance
         espQueue.async { [weak self] in
             let started = CACurrentMediaTime()
@@ -305,7 +364,7 @@ public final class DiagnosticMenu: NSObject {
         aspectConfigurationProvider?(factor)
         let state = aspectStateProvider?() ?? [:]
         if factor <= 1.001 { host.stretchStatus.text = "Обычная 3D-проекция" }
-        else if (state["ready"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Для изменения проекции нужна IPA v17; интерфейс не масштабируется" }
+        else if (state["ready"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Настройка изображения недоступна" }
         else if (state["observed"] as? NSNumber)?.boolValue != true { host.stretchStatus.text = "Ожидание первого кадра 3D-проекции" }
         else { host.stretchStatus.text = String(format: "3D-проекция: ×%.2f · игровой интерфейс в границах экрана", factor) }
     }
@@ -319,16 +378,18 @@ public final class DiagnosticMenu: NSObject {
         }
     }
     private func perform(_ action: String) {
+        if action.hasPrefix("shotPreset."), let index = Int(action.dropFirst(11)) { shotAudio.selectPreset(index); return }
+        if action.hasPrefix("hitPreset."), let index = Int(action.dropFirst(10)) { hitAudio.selectPreset(index); return }
         switch action {
         case "collapse":
             _ = gameActionProvider?("flightRelease", [:])
-            let changes = { self.host.collapsed.toggle(); self.host.applyCollapse(); self.placeWindow() }
-            if MenuPreferences.shared.animations && !UIAccessibility.isReduceMotionEnabled {
+            let changes = { self.host.collapsed.toggle(); self.host.applyCollapse(); self.placeWindow(); self.configureControls() }
+            if MenuPreferences.shared.animations && !MenuPreferences.shared.flag("fpsUp") && !UIAccessibility.isReduceMotionEnabled {
                 UIView.transition(with: host.view, duration: 0.22, options: [.transitionCrossDissolve, .allowUserInteraction], animations: changes)
             } else { changes() }
         case "side":
             host.rightSide.toggle(); dragOrigin = nil
-            if MenuPreferences.shared.animations && !UIAccessibility.isReduceMotionEnabled {
+            if MenuPreferences.shared.animations && !MenuPreferences.shared.flag("fpsUp") && !UIAccessibility.isReduceMotionEnabled {
                 UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.85, initialSpringVelocity: 0, options: [.beginFromCurrentState, .allowUserInteraction]) { self.placeWindow() }
             } else { placeWindow() }
         case "bubble": host.showBubble.toggle(); MenuPreferences.shared.set("bubble", host.showBubble); placeWindow()
@@ -357,6 +418,10 @@ public final class DiagnosticMenu: NSObject {
             prefs.aimWhitelist = prefs.aimWhitelist.isEmpty ? String(id) : prefs.aimWhitelist + ", " + String(id)
             configureControls(); decor.hideAim(); append("ID \(id) добавлен в исключения")
         case "aimClearWhitelist": MenuPreferences.shared.aimWhitelist = ""; configureControls(); append("Исключения очищены")
+        case "reconnect": runGame(action, [:]); configureControls()
+        case "medicineSettings": requestMedicine()
+        case "vehicleColor": requestVehicleColors()
+        case "hydraulicHop", "launchActivate", "teleportImpact": runGame(action, [:])
         case "waypoint", "waypointCancel": runGame(action, [:])
         case "stretchReset": MenuPreferences.shared.stretch = 1; host.resetStretch(); restoreStretch()
         case "teleportXYZ": requestCoordinates()
@@ -373,7 +438,8 @@ public final class DiagnosticMenu: NSObject {
             for key in MenuPreferences.controlKeys { MenuPreferences.shared.set(key, false) }
             controlStopProvider?(); host.syncControlToggles(); configureControls()
             host.actionStatus.text = "Игровые переключатели выключены"; append("Игровые переключатели выключены")
-        case "hop": runGame("hop", ["power": MenuPreferences.shared.hopPower])
+        case "hop", "launchUp", "launchDown": runGame(action, ["power": MenuPreferences.shared.hopPower])
+        case "land": runGame(action, [:])
         case "suicide":
             for key in ["autoHealth", "localProof", "noFall", "noAnim", "fastAnim"] { MenuPreferences.shared.set(key, false) }
             host.syncControlToggles(); configureControls(); runGame(action, [:])
@@ -384,24 +450,134 @@ public final class DiagnosticMenu: NSObject {
         case "flipVehicle": runGame("flipVehicle", [:])
         case "massPed", "massVehicle": runGame(action, ["factor": MenuPreferences.shared.massFactor])
         case "massReset": runGame("massReset", [:])
+        case "aspectOriginal": MenuPreferences.shared.stretch = 1; host.setStretch(1); configureControls(); updateMetrics()
+        case "aspectTablet": MenuPreferences.shared.stretch = 1.5; host.setStretch(1.5); configureControls(); updateMetrics()
+        case "aspectWide": MenuPreferences.shared.stretch = 1.6; host.setStretch(1.6); configureControls(); updateMetrics()
+        case "hitPreview": hitAudio.play()
+        case "hitImport": importingHitSound = true; importShotSound()
+        case "hitReset": hitAudio.reset(); host.actionStatus.text = "Выбран звук попадания"
+        case "clearChat": clearLocalChat()
+        case "visualBalanceSet": requestVisualBalance()
+        case "shotPreview": shotAudio.play()
+        case "shotImport": importingHitSound = false; importShotSound()
+        case "shotReset": shotAudio.reset(); host.actionStatus.text = "Выбран мягкий щелчок"
+        case "commandCompose": composeCommand()
+        case "commandAliases": editCommandAliases()
         case "clear": host.messages.removeAll(); host.refreshLog()
         default: break
         }
     }
     private func configureControls() {
         var values = Dictionary(uniqueKeysWithValues: MenuPreferences.controlKeys.map { ($0, MenuPreferences.shared.flag($0) ? 1.0 : 0.0) })
+        values["regularAim"] = MenuPreferences.shared.flag("regularAim") && host.collapsed ? 1 : 0
+        values["regularAimVisible"] = MenuPreferences.shared.flag("regularAimVisible", fallback: true) ? 1 : 0
+        values["visualBalanceOverride"] = MenuPreferences.shared.flag("visualBalance") ? 1 : 0
+        values["visualBalanceValue"] = MenuPreferences.shared.visualBalance
+        values["aimSmooth"] = MenuPreferences.shared.aimSmooth
+        host.applyTheme()
+        let fpsUp = MenuPreferences.shared.flag("fpsUp")
+        link?.preferredFramesPerSecond = fpsUp ? 30 : 0
+        if let scene { performance25.update(in: scene, enabled: fpsUp) }
+        if !MenuPreferences.shared.flag("autoEvent") { event25.reset() }
+        values["triggerBot"] = MenuPreferences.shared.flag("triggerBot") && host.collapsed ? 1 : 0
+        values["triggerAimOnly"] = MenuPreferences.shared.flag("triggerAimOnly", fallback: true) ? 1 : 0
+        values["triggerRadius"] = MenuPreferences.shared.triggerRadius
+        values["triggerDelay"] = MenuPreferences.shared.triggerDelay
+        values["lagInterval"] = MenuPreferences.shared.lagInterval
+        values["accelerationFactor"] = MenuPreferences.shared.accelerationFactor
+        values["espSkeleton"] = MenuPreferences.shared.flag("espSkeleton") && !fpsUp ? 1 : 0
+        values["espSilhouette"] = MenuPreferences.shared.flag("espSilhouette") && !fpsUp ? 1 : 0
+        if fpsUp { values["chams"] = 0 }
+        medicineConfigurationProvider?(MenuPreferences.shared.medicineCommand, MenuPreferences.shared.medicineThreshold, MenuPreferences.shared.medicineInterval, MenuPreferences.shared.flag("autoMedicine"))
+        values["chamsWalls"] = MenuPreferences.shared.flag("chamsWalls", fallback: true) ? 1 : 0
+        values["chamsDistance"] = MenuPreferences.shared.maxDistance
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        MenuPreferences.shared.accent.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        values["chamsRed"] = Double(red * 255); values["chamsGreen"] = Double(green * 255); values["chamsBlue"] = Double(blue * 255)
+        values["damageFactor"] = MenuPreferences.shared.damageFactor
         values["fireRate"] = MenuPreferences.shared.fireRate
         values["animationRate"] = MenuPreferences.shared.animationRate
+        values["runMultiplier"] = MenuPreferences.shared.runMultiplier
+        values["cameraFOV"] = MenuPreferences.shared.cameraFOV
+        values["worldHour"] = MenuPreferences.shared.worldHour
+        values["worldMinute"] = MenuPreferences.shared.worldMinute
+        values["worldWeather"] = MenuPreferences.shared.worldWeather
+        commandAliasesConfigurationProvider?(MenuPreferences.shared.commandAliases)
         controlConfigurationProvider?(values)
         aspectConfigurationProvider?(MenuPreferences.shared.stretch)
         let prefs = MenuPreferences.shared
         aimConfigurationProvider?(prefs.flag("silentAim"), prefs.fovRadius, prefs.aimMiss, prefs.flag("aimHead"), prefs.aimWhitelist)
+    }
+    private func requestMedicine() {
+        let prefs = MenuPreferences.shared
+        let alert = UIAlertController(title: "Автоаптечка", message: "Введи команду использования аптечки на своём сервере. Порог HP и пауза задаются ниже.", preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "/команда аптечки"; $0.text = prefs.medicineCommand; $0.autocapitalizationType = .none; $0.autocorrectionType = .no }
+        alert.addTextField { $0.placeholder = "Порог HP: 1–99"; $0.keyboardType = .numberPad; $0.text = String(Int(prefs.medicineThreshold)) }
+        alert.addTextField { $0.placeholder = "Пауза: 5–120 секунд"; $0.keyboardType = .numberPad; $0.text = String(Int(prefs.medicineInterval)) }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak alert] _ in
+            let fields = alert?.textFields ?? []; let command = fields.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard fields.count == 3, command.hasPrefix("/"), command.utf8.count < 128, !command.contains("\n"),
+                  let threshold = Double(fields[1].text ?? ""), threshold.isFinite, (1...99).contains(threshold),
+                  let interval = Double(fields[2].text ?? ""), interval.isFinite, (5...120).contains(interval) else { self?.append("Проверь команду, порог HP и паузу"); return }
+            prefs.medicineCommand = command; prefs.medicineThreshold = threshold; prefs.medicineInterval = interval; self?.configureControls()
+        })
+        host.present(alert, animated: true)
+    }
+    private func requestVehicleColors() {
+        let alert = UIAlertController(title: "Цвет автомобиля", message: "Два ID из палитры клиента: 0–255. Изменение локальное.", preferredStyle: .alert)
+        for name in ["Основной цвет", "Второй цвет"] { alert.addTextField { $0.placeholder = name; $0.keyboardType = .numberPad } }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
+            guard let fields = alert?.textFields, fields.count == 2, let a = Int(fields[0].text ?? ""), let b = Int(fields[1].text ?? ""), (0...255).contains(a), (0...255).contains(b) else { self?.append("Цвета: ID от 0 до 255"); return }
+            self?.runGame("vehicleColor", ["primary": Double(a), "secondary": Double(b)])
+        }); host.present(alert, animated: true)
     }
     private func runGame(_ action: String, _ values: [String: Double]) {
         let result = gameActionProvider?(action, values) ?? "Источник управления не подключён"
         host.actionStatus.text = result
         append(result)
         updateMetrics()
+    }
+
+    private func importShotSound() {
+        guard host.presentedViewController == nil else { return }
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.audio], asCopy: true)
+        picker.delegate = self; picker.allowsMultipleSelection = false
+        window?.makeKey(); host.present(picker, animated: true)
+    }
+    public func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        defer { appWindow?.makeKey() }
+        guard let url = urls.first else { return }
+        do { try (importingHitSound ? hitAudio : shotAudio).importFile(url); host.actionStatus.text = importingHitSound ? "Звук попадания сохранён" : "Звук выстрела сохранён" }
+        catch { host.actionStatus.text = "Нужен аудиофайл до 1 МиБ и длительностью до 2 секунд" }
+    }
+    public func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) { appWindow?.makeKey() }
+    private func composeCommand() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Быстрая команда", message: commandSendProvider == nil ? "Команда будет скопирована" : "Введи /cf и аргументы. Команда отправится в игру", preferredStyle: .alert)
+        alert.addTextField { $0.placeholder = "/cf 17"; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: commandSendProvider == nil ? "Скопировать" : "Отправить", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }; self.appWindow?.makeKey()
+            let command = ReactCommandAliases.expand(alert?.textFields?.first?.text ?? "", rules: MenuPreferences.shared.commandAliases)
+            guard !command.isEmpty else { return }
+            if let send = self.commandSendProvider { self.host.actionStatus.text = send(command) }
+            else { UIPasteboard.general.string = command; self.host.actionStatus.text = "Скопировано: " + command }
+        })
+        window?.makeKey(); host.present(alert, animated: true)
+    }
+    private func editCommandAliases() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Сокращения команд", message: "Формат: /cf=/cuff; /короткая=/полная. Включи «Сокращения в чате» для автоматической замены.", preferredStyle: .alert)
+        alert.addTextField { $0.text = MenuPreferences.shared.commandAliases; $0.autocorrectionType = .no; $0.autocapitalizationType = .none }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: "Сохранить", style: .default) { [weak self, weak alert] _ in
+            self?.appWindow?.makeKey()
+            MenuPreferences.shared.commandAliases = String((alert?.textFields?.first?.text ?? "").prefix(2048))
+            self?.configureControls()
+        })
+        window?.makeKey(); host.present(alert, animated: true)
     }
     private func requestAimWhitelist() {
         guard host.presentedViewController == nil else { return }
@@ -436,6 +612,19 @@ public final class DiagnosticMenu: NSObject {
         })
         window?.makeKey(); host.present(alert, animated: MenuPreferences.shared.animations)
     }
+    private func requestVisualBalance() {
+        guard host.presentedViewController == nil else { return }
+        let alert = UIAlertController(title: "Визуальный баланс", message: "Сумма в интерфейсе на этом устройстве", preferredStyle: .alert)
+        alert.addTextField { field in field.keyboardType = .numberPad; field.text = String(format: "%.0f", MenuPreferences.shared.visualBalance) }
+        alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
+        alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
+            guard let self else { return }; self.appWindow?.makeKey()
+            guard let text = alert?.textFields?.first?.text, let value = Double(text), value.isFinite, value >= 0, value <= 99_999_999_999, value.rounded() == value else { self.host.actionStatus.text = "Введи целую сумму от 0 до 99999999999"; return }
+            MenuPreferences.shared.visualBalance = value; MenuPreferences.shared.set("visualBalance", true)
+            self.host.actionStatus.text = "Визуальный баланс изменён"; self.configureControls()
+        })
+        window?.makeKey(); host.present(alert, animated: MenuPreferences.shared.animations)
+    }
     private func requestAppearance(_ action: String) {
         guard host.presentedViewController == nil else { return }
         let state = localStateProvider?() ?? [:]
@@ -453,7 +642,7 @@ public final class DiagnosticMenu: NSObject {
         alert.addAction(UIAlertAction(title: "Отмена", style: .cancel) { [weak self] _ in self?.appWindow?.makeKey() })
         alert.addAction(UIAlertAction(title: "Применить", style: .default) { [weak self, weak alert] _ in
             guard let self else { return }; self.appWindow?.makeKey()
-            guard let fields = alert?.textFields, let text = fields.first?.text, let id = Int(text), (0...1000000).contains(id) else {
+            guard let fields = alert?.textFields, let text = fields.first?.text, let id = Int(text), (0...Int(UInt32.max)).contains(id) else {
                 self.host.actionStatus.text = "Некорректный ID"; return
             }
             var values = ["id": Double(id)]
@@ -497,10 +686,54 @@ public final class DiagnosticMenu: NSObject {
 @MainActor
 private final class MenuPreferences {
     static let shared = MenuPreferences()
-    static let controlKeys = ["autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim"]
+    static let controlKeys = ["autoEvent", "fpsUp", "chams", "waterWalk", "extraDamage", "autoMedicine", "vehicleHydraulics", "vehicleAcceleration", "launchAssist", "vehicleStrobe", "autoHealth", "autoArmor", "stamina", "autoVehicleHealth", "slowFall", "noClip", "localProof", "noFall", "vehicleProof", "infiniteAmmo", "noReload", "rapidFire", "noCollision", "noSpread", "noAnim", "fastAnim", "cameraFOVOverride", "worldTimeOverride", "worldWeatherOverride", "aliasesAuto", "runSpeed", "fakeLag", "antiFreeze", "triggerBot", "regularAim", "customShotSound", "customHitSound", "hideServerLogo"]
     private let defaults = UserDefaults(suiteName: "local.brmenu.settings.v6") ?? .standard
     func flag(_ key: String, fallback: Bool = false) -> Bool { defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key) }
     func set(_ key: String, _ value: Bool) { defaults.set(value, forKey: key) }
+    var lagInterval: Double {
+        get { defaults.object(forKey: "lagInterval") == nil ? 200 : max(50, min(500, defaults.double(forKey: "lagInterval"))) }
+        set { defaults.set(newValue, forKey: "lagInterval") }
+    }
+    var triggerRadius: Double {
+        get { defaults.object(forKey: "triggerRadius") == nil ? 10 : max(2, min(30, defaults.double(forKey: "triggerRadius"))) }
+        set { defaults.set(newValue, forKey: "triggerRadius") }
+    }
+    var triggerDelay: Double {
+        get { defaults.object(forKey: "triggerDelay") == nil ? 120 : max(0, min(500, defaults.double(forKey: "triggerDelay"))) }
+        set { defaults.set(newValue, forKey: "triggerDelay") }
+    }
+    var aimSmooth: Double {
+        get { defaults.object(forKey: "aimSmooth") == nil ? 0.2 : max(0.02, min(1, defaults.double(forKey: "aimSmooth"))) }
+        set { defaults.set(newValue, forKey: "aimSmooth") }
+    }
+    var visualBalance: Double {
+        get { defaults.object(forKey: "visualBalanceValue") == nil ? 1_000_000 : max(0, min(99_999_999_999, defaults.double(forKey: "visualBalanceValue"))) }
+        set { defaults.set(newValue, forKey: "visualBalanceValue") }
+    }
+    var runMultiplier: Double {
+        get { defaults.object(forKey: "runMultiplier") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "runMultiplier"))) }
+        set { defaults.set(newValue, forKey: "runMultiplier") }
+    }
+    var cameraFOV: Double {
+        get { defaults.object(forKey: "cameraFOV") == nil ? 70 : max(50, min(120, defaults.double(forKey: "cameraFOV"))) }
+        set { defaults.set(newValue, forKey: "cameraFOV") }
+    }
+    var worldHour: Double {
+        get { max(0, min(23, defaults.double(forKey: "worldHour"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldHour") }
+    }
+    var worldMinute: Double {
+        get { max(0, min(59, defaults.double(forKey: "worldMinute"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldMinute") }
+    }
+    var worldWeather: Double {
+        get { max(0, min(21, defaults.double(forKey: "worldWeather"))) }
+        set { defaults.set(newValue.rounded(), forKey: "worldWeather") }
+    }
+    var commandAliases: String {
+        get { defaults.string(forKey: "commandAliases") ?? "/cf=/cuff" }
+        set { defaults.set(newValue, forKey: "commandAliases") }
+    }
     var opacity: CGFloat {
         get { defaults.object(forKey: "opacity") == nil ? 0.96 : max(0.45, min(1, CGFloat(defaults.double(forKey: "opacity")))) }
         set { defaults.set(Double(newValue), forKey: "opacity") }
@@ -513,8 +746,12 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "animationRate") == nil ? 2 : max(1, min(4, defaults.double(forKey: "animationRate"))) }
         set { defaults.set(newValue, forKey: "animationRate") }
     }
+    var damageFactor: Double {
+        get { defaults.object(forKey: "damageFactor") == nil ? 2 : max(1, min(5, defaults.double(forKey: "damageFactor"))) }
+        set { defaults.set(newValue, forKey: "damageFactor") }
+    }
     var fireRate: Double {
-        get { defaults.object(forKey: "fireRate") == nil ? 2 : max(1, min(5, defaults.double(forKey: "fireRate"))) }
+        get { defaults.object(forKey: "fireRate") == nil ? 2 : max(1, min(15, defaults.double(forKey: "fireRate"))) }
         set { defaults.set(newValue, forKey: "fireRate") }
     }
     var gravityFactor: Double {
@@ -529,6 +766,13 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "massFactor") == nil ? 1 : max(0.1, min(5, defaults.double(forKey: "massFactor"))) }
         set { defaults.set(newValue, forKey: "massFactor") }
     }
+    var accelerationFactor: Double {
+        get { defaults.object(forKey: "accelerationFactor") == nil ? 2 : max(1, min(5, defaults.double(forKey: "accelerationFactor"))) }
+        set { defaults.set(newValue, forKey: "accelerationFactor") }
+    }
+    var medicineCommand: String { get { defaults.string(forKey: "medicineCommand") ?? "" } set { defaults.set(newValue, forKey: "medicineCommand") } }
+    var medicineThreshold: Double { get { defaults.object(forKey: "medicineThreshold") == nil ? 35 : max(1, min(99, defaults.double(forKey: "medicineThreshold"))) } set { defaults.set(newValue, forKey: "medicineThreshold") } }
+    var medicineInterval: Double { get { defaults.object(forKey: "medicineInterval") == nil ? 15 : max(5, min(120, defaults.double(forKey: "medicineInterval"))) } set { defaults.set(newValue, forKey: "medicineInterval") } }
     var boostPower: Double {
         get { defaults.object(forKey: "boostPower") == nil ? 1.5 : max(1, min(3, defaults.double(forKey: "boostPower"))) }
         set { defaults.set(newValue, forKey: "boostPower") }
@@ -545,7 +789,7 @@ private final class MenuPreferences {
         get { defaults.object(forKey: "hopPower") == nil ? 1 : max(1, min(5, defaults.double(forKey: "hopPower"))) }
         set { defaults.set(newValue, forKey: "hopPower") }
     }
-    var needsPlayers: Bool { flag("esp") || flag("silentAim") }
+    var needsPlayers: Bool { !flag("fpsUp") && (flag("esp") || flag("silentAim") || flag("triggerBot") || flag("regularAim")) }
     var aimMiss: Double {
         get { max(0, min(100, defaults.double(forKey: "aimMiss"))) }
         set { defaults.set(newValue, forKey: "aimMiss") }
@@ -564,13 +808,26 @@ private final class MenuPreferences {
     }
     var animations: Bool { flag("animations", fallback: true) }
     var large: Bool { flag("large") }
-    var accent: UIColor { defaults.integer(forKey: "accent") == 1 ? .systemOrange : .systemCyan }
+    static let palette: [(String, UIColor)] = [("Лёд", .systemCyan), ("Огонь", .systemOrange), ("Аметист", .systemPurple), ("Лайм", .systemGreen), ("Роза", .systemPink), ("Золото", .systemYellow), ("Синий", .systemBlue), ("Мята", .systemMint), ("Красный", .systemRed), ("Белый", .white), ("Индиго", .systemIndigo), ("Бирюза", .systemTeal)]
+    var accent: UIColor {
+        if accentIndex == Self.palette.count, let rgba = defaults.array(forKey: "customAccent") as? [Double], rgba.count == 4 {
+            return UIColor(red: rgba[0], green: rgba[1], blue: rgba[2], alpha: 1)
+        }
+        return Self.palette[max(0, min(Self.palette.count-1, accentIndex))].1
+    }
     var accentIndex: Int { get { defaults.integer(forKey: "accent") } set { defaults.set(newValue, forKey: "accent") } }
+    func setCustomAccent(_ color: UIColor) {
+        var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else { return }
+        defaults.set([Double(red), Double(green), Double(blue), 1], forKey: "customAccent"); accentIndex = Self.palette.count
+    }
+
 }
 
 @MainActor
 private final class DiagnosticDecor: UIView {
     private let hud = UILabel()
+    private let brand = UILabel()
     private let aimCircle = CAShapeLayer(), aimCircleOutline = CAShapeLayer()
     private let shootLabel = CATextLayer()
     func hideAim() {
@@ -580,7 +837,7 @@ private final class DiagnosticDecor: UIView {
     }
     func updateAim(_ state: [String: Any]) {
         let prefs = MenuPreferences.shared
-        guard prefs.flag("silentAim") else { hideAim(); return }
+        guard prefs.flag("silentAim") || prefs.flag("regularAim") else { hideAim(); return }
         let armed = (state["ready"] as? NSNumber)?.boolValue == true
         let id = (state["target"] as? NSNumber)?.intValue ?? -1
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -606,6 +863,7 @@ private final class DiagnosticDecor: UIView {
     struct Actor {
         var lo: SIMD3<Double>, hi: SIMD3<Double>, hp: Double, distance: Double
         var name: String, id: Int, armor: Double
+        var segments: [[Double]] = []
         var label = NSAttributedString(string: "")
         var labelWidth: CGFloat = 0
     }
@@ -613,7 +871,7 @@ private final class DiagnosticDecor: UIView {
     var horizontalScale: CGFloat = 1
     var receivedAt: CFTimeInterval = 0
     private var actors: [Actor] = []
-    private let espOutline = CAShapeLayer(), espLines = CAShapeLayer()
+    private let espOutline = CAShapeLayer(), espLines = CAShapeLayer(), skeletonLines = CAShapeLayer(), silhouettes = CAShapeLayer()
     private let hpBackground = CAShapeLayer(), hpGood = CAShapeLayer(), hpLow = CAShapeLayer()
     private var labelLayers: [Int: CATextLayer] = [:]
     var players: [[String: Any]] = [] {
@@ -625,7 +883,8 @@ private final class DiagnosticDecor: UIView {
                     hp: (player["hp"] as? NSNumber)?.doubleValue ?? 0,
                     distance: (player["distance"] as? NSNumber)?.doubleValue ?? -1,
                     name: player["name"] as? String ?? "Player", id: (player["id"] as? NSNumber)?.intValue ?? -1,
-                    armor: (player["armor"] as? NSNumber)?.doubleValue ?? 0)
+                    armor: (player["armor"] as? NSNumber)?.doubleValue ?? 0,
+                    segments: (player["segments"] as? [[NSNumber]] ?? []).prefix(128).map { $0.map { $0.doubleValue } }.filter { $0.count == 6 && $0.allSatisfy { $0.isFinite } })
             }
             rebuildLabels()
         }
@@ -668,9 +927,9 @@ private final class DiagnosticDecor: UIView {
         setNeedsDisplay()
     }
     func hideESP() {
-        guard espLines.path != nil || espOutline.path != nil || labelLayers.values.contains(where: { !$0.isHidden }) else { return }
+        guard silhouettes.path != nil || skeletonLines.path != nil || espLines.path != nil || espOutline.path != nil || labelLayers.values.contains(where: { !$0.isHidden }) else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { shape.path = nil }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { shape.path = nil }
         for label in labelLayers.values { label.isHidden = true }
         CATransaction.commit()
     }
@@ -679,12 +938,26 @@ private final class DiagnosticDecor: UIView {
         guard prefs.flag("esp"), let camera, camera.count == 16 else { hideESP(); return }
         let showBox = prefs.flag("espBox", fallback: true), showHP = prefs.flag("espHP", fallback: true)
         let maxDistance = prefs.maxDistance
-        let boxes = CGMutablePath(), backgrounds = CGMutablePath(), green = CGMutablePath(), red = CGMutablePath()
+        let boxes = CGMutablePath(), backgrounds = CGMutablePath(), green = CGMutablePath(), red = CGMutablePath(), skeleton = CGMutablePath(), silhouette = CGMutablePath()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         for label in labelLayers.values { label.isHidden = true }
         for actor in actors {
             if actor.distance >= 0 && actor.distance > maxDistance { continue }
             guard let box = screenBox(actor, camera: camera), box.width > 1, box.height > 2 else { continue }
+            if prefs.flag("espSkeleton") || prefs.flag("espSilhouette") {
+                for segment in actor.segments {
+                    guard let a = screenPoint(segment[0],segment[1],segment[2], camera: camera),
+                          let b = screenPoint(segment[3],segment[4],segment[5], camera: camera),
+                          hypot(a.x-b.x,a.y-b.y) < bounds.height else { continue }
+                    skeleton.move(to: a); skeleton.addLine(to: b)
+                    // Projected bone capsules give a translucent anatomical silhouette.
+                    let width = max(2, min(18, box.height * 0.065)), dx = b.x-a.x, dy = b.y-a.y, length = hypot(dx,dy)
+                    guard length > 0.1 else { continue }
+                    let nx = -dy/length*width/2, ny = dx/length*width/2
+                    silhouette.move(to: CGPoint(x:a.x+nx,y:a.y+ny)); silhouette.addLine(to: CGPoint(x:b.x+nx,y:b.y+ny))
+                    silhouette.addLine(to: CGPoint(x:b.x-nx,y:b.y-ny)); silhouette.addLine(to: CGPoint(x:a.x-nx,y:a.y-ny)); silhouette.closeSubpath()
+                }
+            }
             if showBox { boxes.addRect(box) }
             if showHP {
                 let bar = CGRect(x: box.minX-6, y: box.minY, width: 3, height: box.height)
@@ -700,8 +973,17 @@ private final class DiagnosticDecor: UIView {
             }
         }
         espOutline.path = boxes; espLines.path = boxes
+        skeletonLines.path = prefs.flag("espSkeleton") ? skeleton : nil; skeletonLines.strokeColor = prefs.accent.cgColor
+        silhouettes.path = prefs.flag("espSilhouette") ? silhouette : nil; silhouettes.fillColor = prefs.accent.withAlphaComponent(0.35).cgColor
         hpBackground.path = backgrounds; hpGood.path = green; hpLow.path = red
         CATransaction.commit()
+    }
+    private func screenPoint(_ x: Double,_ y: Double,_ z: Double, camera m: [Double]) -> CGPoint? {
+        let depth = m[2]*x + m[6]*y + m[10]*z + m[14]
+        guard depth.isFinite, depth > 0.05 else { return nil }
+        let px = (m[0]*x + m[4]*y + m[8]*z + m[12])/depth, py = (m[1]*x + m[5]*y + m[9]*z + m[13])/depth
+        guard px.isFinite, py.isFinite, (-1...2).contains(px), (-1...2).contains(py) else { return nil }
+        return CGPoint(x: bounds.midX+(CGFloat(px)*bounds.width-bounds.midX)*horizontalScale, y: CGFloat(py)*bounds.height)
     }
     private func screenBox(_ actor: Actor, camera m: [Double]) -> CGRect? {
         var x0 = Double.infinity, y0 = Double.infinity, x1 = -Double.infinity, y1 = -Double.infinity
@@ -730,8 +1012,9 @@ private final class DiagnosticDecor: UIView {
         hud.numberOfLines = 2; hud.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
         hud.backgroundColor = UIColor.black.withAlphaComponent(0.65)
         hud.layer.cornerRadius = 10; hud.clipsToBounds = true
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { layer.addSublayer(shape) }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { layer.addSublayer(shape) }
         espOutline.fillColor = nil; espOutline.strokeColor = UIColor.black.withAlphaComponent(0.8).cgColor; espOutline.lineWidth = 3
+        skeletonLines.fillColor = nil; skeletonLines.lineWidth = 1.5; skeletonLines.lineCap = .round; skeletonLines.lineJoin = .round
         espLines.fillColor = nil; espLines.strokeColor = MenuPreferences.shared.accent.cgColor; espLines.lineWidth = 1
         hpBackground.fillColor = UIColor.black.withAlphaComponent(0.8).cgColor
         hpGood.fillColor = UIColor.systemGreen.cgColor; hpLow.fillColor = UIColor.systemRed.cgColor
@@ -742,10 +1025,15 @@ private final class DiagnosticDecor: UIView {
         layer.addSublayer(shootLabel)
         hud.accessibilityIdentifier = "diagnostics.hud"
         addSubview(hud)
+        brand.text = "React Modifications"; brand.textAlignment = .center
+        brand.font = .systemFont(ofSize: 12, weight: .semibold)
+        brand.layer.shadowColor = UIColor.black.cgColor; brand.layer.shadowOpacity = 0.9; brand.layer.shadowRadius = 2
+        brand.accessibilityIdentifier = "diagnostics.brand"; addSubview(brand)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(text: String, insets: UIEdgeInsets) {
         safe = insets; hud.text = "  " + text.replacingOccurrences(of: "\n", with: "\n  ")
+        brand.textColor = MenuPreferences.shared.accent
         hud.textColor = MenuPreferences.shared.accent
         hud.isHidden = !MenuPreferences.shared.flag("hud", fallback: true)
         setNeedsLayout(); setNeedsDisplay()
@@ -753,9 +1041,10 @@ private final class DiagnosticDecor: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        for shape in [espOutline, espLines, hpBackground, hpGood, hpLow] { shape.frame = bounds }
+        for shape in [silhouettes, espOutline, espLines, skeletonLines, hpBackground, hpGood, hpLow] { shape.frame = bounds }
         CATransaction.commit()
         renderESP()
+        brand.frame = CGRect(x: safe.left + 10, y: max(safe.top, bounds.height-safe.bottom-24), width: max(0, bounds.width-safe.left-safe.right-20), height: 20)
         hud.frame = CGRect(x: safe.left + 12, y: safe.top + 10, width: min(310, bounds.width - safe.left - safe.right - 24), height: 46)
     }
     override func draw(_ rect: CGRect) {
@@ -799,13 +1088,17 @@ private final class MenuController: UIViewController {
     private var selectedPage: Int? = nil
     private let categoryTitles = ["Диагностика", "ESP и визуалы", "Движение", "Транспорт", "Персонаж", "Оружие", "Silent Aim", "Настройки"]
     private let pages = (0..<8).map { _ in UIStackView() }
+    private var disclosures26: [(UIButton, UIStackView, String)] = []
+    private var sections26: [(UIButton, UIStackView, String)] = []
     private let blur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
     var messages: [String] = []
     var collapsed = false, rightSide = true
     let aimStatus = UILabel()
+    let extensionStatus = UILabel()
     private let stretchSlider = UISlider()
     private let stretchLabel = UILabel()
     let stretchStatus = UILabel()
+    func setStretch(_ value: Double) { stretchSlider.value = Float(value); stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", value) }
     func resetStretch() { stretchSlider.value = 1; stretchLabel.text = "Масштаб 3D-проекции: ×1.00"; stretchStatus.text = "Растяг выключен" }
     var showBubble = MenuPreferences.shared.flag("bubble", fallback: true)
     var onAction: ((String) -> Void)?, onMove: (() -> Void)?, onDrag: ((CGPoint) -> Void)?, onChange: (() -> Void)?
@@ -817,14 +1110,14 @@ private final class MenuController: UIViewController {
         view.layer.borderWidth = 1; view.layer.borderColor = MenuPreferences.shared.accent.withAlphaComponent(0.35).cgColor
         view.overrideUserInterfaceStyle = .dark
         blur.isUserInteractionEnabled = false; view.addSubview(blur)
-        let layout = UIStackView(); layout.axis = .vertical; layout.spacing = 12
+        let layout = UIStackView(); layout.axis = .vertical; layout.spacing = 8
         layout.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(layout)
         NSLayoutConstraint.activate([
-            layout.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 14), layout.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -14),
-            layout.topAnchor.constraint(equalTo: view.topAnchor, constant: 14), layout.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14)
+            layout.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10), layout.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            layout.topAnchor.constraint(equalTo: view.topAnchor, constant: 10), layout.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -10)
         ])
         let header = UIStackView(); header.spacing = 8
-        let title = UILabel(); title.text = "BR  /  STUDIO"; title.textColor = .white; title.font = .boldSystemFont(ofSize: 18)
+        let title = UILabel(); title.text = "React Modifications"; title.textColor = .white; title.font = .boldSystemFont(ofSize: 18); title.adjustsFontSizeToFitWidth = true; title.minimumScaleFactor = 0.7
         title.isUserInteractionEnabled = true
         title.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
         header.addArrangedSubview(title)
@@ -838,32 +1131,32 @@ private final class MenuController: UIViewController {
         navigation.addArrangedSubview(home); navigation.addArrangedSubview(pageTitle)
         layout.addArrangedSubview(navigation)
         actionStatus.numberOfLines = 2; actionStatus.font = .systemFont(ofSize: 12)
-        actionStatus.textColor = .systemOrange; actionStatus.text = "v18 · выбери раздел"
+        actionStatus.textColor = .systemOrange; actionStatus.text = ""
         actionStatus.accessibilityIdentifier = "diagnostics.actionStatus"
         layout.addArrangedSubview(actionStatus)
         scroll.alwaysBounceVertical = true
         layout.addArrangedSubview(scroll)
-        content.axis = .vertical; content.spacing = 12; content.translatesAutoresizingMaskIntoConstraints = false
+        content.axis = .vertical; content.spacing = 8; content.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor), content.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
             content.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), content.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
             content.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor)
         ])
-        categoryGrid.axis = .vertical; categoryGrid.spacing = 10
+        categoryGrid.axis = .vertical; categoryGrid.spacing = 6
         let symbols = ["waveform.path.ecg", "eye", "figure.walk", "car.fill", "person.fill", "scope", "dot.scope", "slider.horizontal.3"]
         // A two-column home replaces eight small, hard-to-hit segments.
         for pair in [[4, 2], [3, 5], [1, 6], [7, 0]] {
-            let row = UIStackView(); row.spacing = 10; row.distribution = .fillEqually
+            let row = UIStackView(); row.spacing = 6; row.distribution = .fillEqually
             for index in pair {
                 let b = UIButton(type: .system)
                 var config = UIButton.Configuration.tinted(); config.title = categoryTitles[index]
-                config.image = UIImage(systemName: symbols[index]); config.imagePlacement = .top; config.imagePadding = 8
+                config.image = UIImage(systemName: symbols[index]); config.imagePlacement = .top; config.imagePadding = 4
                 config.baseForegroundColor = MenuPreferences.shared.accent; config.cornerStyle = .large
                 config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
                     var result = attributes; result.font = .systemFont(ofSize: 14, weight: .semibold); return result
                 }
-                b.configuration = config; b.heightAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
+                b.configuration = config; b.heightAnchor.constraint(greaterThanOrEqualToConstant: 58).isActive = true
                 b.accessibilityIdentifier = "diagnostics.category.\(index)"
                 b.addAction(UIAction { [weak self] _ in self?.showPage(index) }, for: .touchUpInside)
                 row.addArrangedSubview(b)
@@ -871,28 +1164,31 @@ private final class MenuController: UIViewController {
             categoryGrid.addArrangedSubview(row)
         }
         content.addArrangedSubview(categoryGrid)
-        for page in pages { page.axis = .vertical; page.spacing = 12; content.addArrangedSubview(page) }
+        for page in pages { page.axis = .vertical; page.spacing = 8; content.addArrangedSubview(page) }
         metrics.numberOfLines = 0; metrics.font = .monospacedSystemFont(ofSize: 12, weight: .medium); metrics.textColor = .white
         pages[0].addArrangedSubview(metrics)
         coordinates.numberOfLines = 0; coordinates.font = .monospacedSystemFont(ofSize: 11, weight: .regular); coordinates.textColor = MenuPreferences.shared.accent
         pages[0].addArrangedSubview(coordinates)
         espStatus.numberOfLines = 0; espStatus.font = .systemFont(ofSize: 11); espStatus.textColor = .systemOrange
         pages[0].addArrangedSubview(espStatus)
-        pages[0].addArrangedSubview(note("FPS GLK — прирост framesDisplayed активного GLKViewController. Это кадровые обновления, не замер GPU. UI Гц — отдельный счётчик."))
         let actions = UIStackView(); actions.spacing = 8; actions.distribution = .fillEqually
         actions.addArrangedSubview(button("Сторона", "side")); actions.addArrangedSubview(button("Копия", "copy")); pages[0].addArrangedSubview(actions)
         log.isEditable = false; log.font = .monospacedSystemFont(ofSize: 10, weight: .regular); log.textColor = .secondaryLabel
         log.backgroundColor = UIColor.white.withAlphaComponent(0.04); log.layer.cornerRadius = 10
         log.heightAnchor.constraint(equalToConstant: 75).isActive = true
-        pages[0].addArrangedSubview(log); pages[0].addArrangedSubview(button("Очистить журнал", "clear"))
-        pages[1].addArrangedSubview(toggle("ESP · эксперимент", key: "esp"))
+        pages[0].addArrangedSubview(log); pages[0].addArrangedSubview(button("Очистить журнал", "clear")); pages[0].addArrangedSubview(button("Переподключиться к серверу", "reconnect"))
+        pages[1].addArrangedSubview(toggle("ESP", key: "esp"))
         pages[1].addArrangedSubview(note("Данные игроков: 10–30 Гц. Проекция боксов — каждый кадр экрана."))
         let rate = UISlider(); rate.minimumValue = 10; rate.maximumValue = 30; rate.value = Float(MenuPreferences.shared.espRate)
         rate.accessibilityLabel = "Частота данных ESP"
         rate.addAction(UIAction { [weak rate] _ in MenuPreferences.shared.espRate = Double(rate?.value ?? 20) }, for: .valueChanged)
         pages[1].addArrangedSubview(rate)
-        pages[1].addArrangedSubview(toggle("За стенами · без фильтра отрисовки", key: "espWalls", fallback: true))
+        pages[1].addArrangedSubview(toggle("За стенами", key: "espWalls", fallback: true))
         pages[1].addArrangedSubview(toggle("Боксы", key: "espBox", fallback: true))
+        pages[1].addArrangedSubview(toggle("Скелет · реальные кости", key: "espSkeleton"))
+        pages[1].addArrangedSubview(toggle("Силуэт по костям", key: "espSilhouette"))
+        pages[1].addArrangedSubview(toggle("Чамсы · заливка модели", key: "chams"))
+        pages[1].addArrangedSubview(toggle("Чамсы за стенами", key: "chamsWalls", fallback: true))
         pages[1].addArrangedSubview(toggle("Ник и ID", key: "espName", fallback: true))
         pages[1].addArrangedSubview(toggle("HP и полоса здоровья", key: "espHP", fallback: true))
         pages[1].addArrangedSubview(toggle("Броня", key: "espArmor"))
@@ -903,7 +1199,6 @@ private final class MenuController: UIViewController {
         range.addAction(UIAction { [weak self, weak range] _ in
             MenuPreferences.shared.maxDistance = Double(range?.value ?? 150); self?.onChange?()
         }, for: .valueChanged); pages[1].addArrangedSubview(range)
-        pages[1].addArrangedSubview(note("ESP читает только streamed-игроков этой сборки. Невидимые для клиента сущности недоступны. Дальность считается от камеры."))
         pages[1].addArrangedSubview(toggle("Компактный HUD", key: "hud", fallback: true))
         pages[1].addArrangedSubview(toggle("Прицел в центре экрана", key: "crosshair"))
         pages[1].addArrangedSubview(toggle("Направляющие 3 × 3", key: "grid"))
@@ -913,12 +1208,18 @@ private final class MenuController: UIViewController {
         fov.accessibilityLabel = "Радиус FOV"
         fov.addAction(UIAction { [weak self, weak fov] _ in MenuPreferences.shared.fovRadius = Double(fov?.value ?? 100); self?.onChange?() }, for: .valueChanged)
         pages[1].addArrangedSubview(fov)
-        pages[1].addArrangedSubview(note("Общий круг — направляющая. Настройки динамического круга Silent Aim находятся во вкладке Aim."))
-        pages[2].addArrangedSubview(note("Экспериментальные локальные действия · 1.99.0. Результат в игре ещё нужно проверить."))
+        pages[2].addArrangedSubview(toggle("Ускорение пешком", key: "runSpeed"))
+        let runLabel = note(String(format: "Скорость бега: ×%.1f", MenuPreferences.shared.runMultiplier))
+        let runSpeed = UISlider(); runSpeed.minimumValue = 1; runSpeed.maximumValue = 3; runSpeed.value = Float(MenuPreferences.shared.runMultiplier)
+        runSpeed.addAction(UIAction { [weak self, weak runSpeed] _ in
+            MenuPreferences.shared.runMultiplier = Double(runSpeed?.value ?? 1.5)
+            runLabel.text = String(format: "Скорость бега: ×%.1f", MenuPreferences.shared.runMultiplier); self?.onChange?()
+        }, for: .valueChanged)
+        pages[2].addArrangedSubview(runLabel); pages[2].addArrangedSubview(runSpeed)
+        flightStatus.accessibilityIdentifier = "diagnostics.flightStatus"
         flightStatus.text = "AirBrake выключен"; flightStatus.font = .systemFont(ofSize: 11); flightStatus.textColor = .systemOrange
         pages[2].addArrangedSubview(flightStatus)
         pages[2].addArrangedSubview(toggle("No Collision · без столкновений", key: "noCollision"))
-        pages[2].addArrangedSubview(note("Для персонажа пешком. Отключай в свободном месте; сервер может исправить положение."))
         pages[2].addArrangedSubview(toggle("NoClip только в AirBrake", key: "noClip"))
         pages[2].addArrangedSubview(button("AirBrake · включить / выключить", "flightToggle"))
         let flightSpeed = UISlider(); flightSpeed.minimumValue = 1; flightSpeed.maximumValue = 30; flightSpeed.value = Float(MenuPreferences.shared.flightSpeed)
@@ -930,72 +1231,84 @@ private final class MenuController: UIViewController {
             for (title, action) in directions { row.addArrangedSubview(holdButton(title, action)) }
             pages[2].addArrangedSubview(row)
         }
-        pages[2].addArrangedSubview(note("NoClip отключает локальный флаг столкновений только в AirBrake. Выключай полёт в свободном месте; сервер может корректировать положение."))
-        pages[2].addArrangedSubview(button("Телепорт по метке на карте", "waypoint"))
-        pages[2].addArrangedSubview(button("Отменить телепорт по метке", "waypointCancel"))
-        pages[2].addArrangedSubview(note("Поставь метку, закрой карту и нажми телепорт. Только пешком. Для дальней точки ждём загрузки земли до 8 секунд; при неудаче возвращаем назад."))
-        pages[2].addArrangedSubview(button("Телепорт по XYZ", "teleportXYZ"))
-        pages[2].addArrangedSubview(button("К загруженному игроку по ID", "teleportPlayer"))
-        pages[2].addArrangedSubview(button("К транспорту по ID", "teleportVehicle"))
-        pages[2].addArrangedSubview(button("К ближайшему загруженному авто", "nearestVehicle"))
-        pages[2].addArrangedSubview(button("Сохранить текущую точку", "savePoint"))
-        pages[2].addArrangedSubview(button("Вернуться в сохранённую точку", "returnPoint"))
-        pages[2].addArrangedSubview(note("Сила прыжка · 1–5"))
+        pages[2].addArrangedSubview(button("По метке", "waypoint"))
+        pages[2].addArrangedSubview(button("Отменить", "waypointCancel"))
+        pages[2].addArrangedSubview(button("По XYZ", "teleportXYZ"))
+        pages[2].addArrangedSubview(button("К попаданию", "teleportImpact"))
+        pages[2].addArrangedSubview(button("К игроку", "teleportPlayer"))
+        pages[2].addArrangedSubview(button("К авто по ID", "teleportVehicle"))
+        pages[2].addArrangedSubview(button("Ближайшее авто", "nearestVehicle"))
+        pages[2].addArrangedSubview(button("Сохранить точку", "savePoint"))
+        pages[2].addArrangedSubview(button("Вернуться", "returnPoint"))
+        let hopHeading = note("Сила прыжка · 1–5"); hopHeading.accessibilityIdentifier = "diagnostics.hopHeading"; pages[2].addArrangedSubview(hopHeading)
         let hop = UISlider(); hop.minimumValue = 1; hop.maximumValue = 5; hop.value = Float(MenuPreferences.shared.hopPower)
         hop.accessibilityLabel = "Сила прыжка"
         hop.addAction(UIAction { [weak hop] _ in MenuPreferences.shared.hopPower = Double(hop?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(hop)
-        pages[2].addArrangedSubview(button("Высокий прыжок", "hop"))
-        pages[2].addArrangedSubview(button("Рывок вперёд · та же сила 1–5", "dash"))
+        pages[2].addArrangedSubview(button("Прыжок", "hop"))
+        pages[2].addArrangedSubview(button("Вверх", "launchUp"))
+        pages[2].addArrangedSubview(button("Вниз", "launchDown"))
+        pages[2].addArrangedSubview(button("На землю", "land"))
+        pages[2].addArrangedSubview(toggle("Ходьба под водой", key: "waterWalk"))
+        pages[2].addArrangedSubview(button("Рывок", "dash"))
         pages[2].addArrangedSubview(toggle("Мягкое падение", key: "slowFall"))
-        pages[2].addArrangedSubview(note("Мягкое падение ограничивает скорость снижения. Иммунитет к урону от падения не гарантируется."))
-        pages[2].addArrangedSubview(note("Множитель массы · 0.1–5"))
+        let massHeading = note("Множитель массы · 0.1–5"); massHeading.accessibilityIdentifier = "diagnostics.massHeading"; pages[2].addArrangedSubview(massHeading)
         let mass = UISlider(); mass.minimumValue = 0.1; mass.maximumValue = 5; mass.value = Float(MenuPreferences.shared.massFactor)
         mass.accessibilityLabel = "Множитель массы"
         mass.addAction(UIAction { [weak mass] _ in MenuPreferences.shared.massFactor = Double(mass?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(mass)
-        pages[2].addArrangedSubview(button("Применить массу к персонажу", "massPed"))
-        pages[2].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
+        pages[2].addArrangedSubview(button("Задать массу", "massPed"))
+        pages[2].addArrangedSubview(button("Сброс массы", "massReset"))
         pages[2].addArrangedSubview(note("Гравитация · множитель от −2 до 3"))
         let gravity = UISlider(); gravity.minimumValue = -2; gravity.maximumValue = 3; gravity.value = Float(MenuPreferences.shared.gravityFactor)
         gravity.accessibilityLabel = "Множитель гравитации"
         gravity.addAction(UIAction { [weak gravity] _ in MenuPreferences.shared.gravityFactor = Double(gravity?.value ?? 1) }, for: .valueChanged)
         pages[2].addArrangedSubview(gravity)
-        pages[2].addArrangedSubview(note("1 — исходная, 0 — без притяжения, отрицательная — вверх. Применяется кнопкой."))
-        pages[2].addArrangedSubview(button("Применить гравитацию к персонажу", "gravityPed"))
-        pages[2].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
-        pages[3].addArrangedSubview(note("Доступно после посадки в транспорт. Серверная синхронизация может изменить результат."))
+        pages[2].addArrangedSubview(button("Задать гравитацию", "gravityPed"))
+        pages[2].addArrangedSubview(button("Сброс гравитации", "gravityReset"))
         carStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); carStatus.textColor = .systemCyan; carStatus.numberOfLines = 0
         pages[3].addArrangedSubview(carStatus)
-        pages[3].addArrangedSubview(button("Bypass Lock · открыть ближайшую машину", "unlockVehicle"))
-        pages[3].addArrangedSubview(button("Drive Without Key · запустить двигатель", "startEngine"))
-        pages[3].addArrangedSubview(note("Замок — рядом до 8 м. Двигатель — за рулём. Меняется состояние клиента; серверные ключи и права не выдаются."))
-        pages[3].addArrangedSubview(button("Подменить модель машины по ID", "carSet"))
-        pages[3].addArrangedSubview(button("Вернуть исходную модель машины", "carRestore"))
-        pages[3].addArrangedSubview(button("Остановить транспорт", "stopVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить HP авто", "healVehicle"))
-        pages[3].addArrangedSubview(button("Ремонт кузова · эксперимент", "repairVehicle"))
-        pages[3].addArrangedSubview(toggle("Блокировать локальный урон авто", key: "vehicleProof"))
+        pages[3].addArrangedSubview(button("Открыть авто", "unlockVehicle"))
+        pages[3].addArrangedSubview(button("Запустить", "startEngine"))
+        pages[3].addArrangedSubview(button("Модель по ID", "carSet"))
+        pages[3].addArrangedSubview(button("Вернуть модель", "carRestore"))
+        pages[3].addArrangedSubview(button("Остановить", "stopVehicle"))
+        pages[3].addArrangedSubview(button("HP авто", "healVehicle"))
+        pages[3].addArrangedSubview(button("Ремонт", "repairVehicle"))
+        pages[3].addArrangedSubview(toggle("Защита транспорта", key: "vehicleProof"))
         pages[3].addArrangedSubview(toggle("Автовосстановление HP авто", key: "autoVehicleHealth"))
-        pages[3].addArrangedSubview(note("Удерживает локальные HP не ниже 1000. Кузов и разрушенное авто эта функция не восстанавливает."))
-        pages[3].addArrangedSubview(button("Поставить на колёса", "flipVehicle"))
-        pages[3].addArrangedSubview(note("Разовое ускорение · 1–3"))
+        pages[3].addArrangedSubview(button("На колёса", "flipVehicle"))
+        pages[3].addArrangedSubview(toggle("Постоянное ускорение", key: "vehicleAcceleration"))
+        let accelerationLabel = note(String(format: "Множитель разгона: ×%.1f", MenuPreferences.shared.accelerationFactor))
+        let acceleration = UISlider(); acceleration.minimumValue = 1; acceleration.maximumValue = 5; acceleration.value = Float(MenuPreferences.shared.accelerationFactor)
+        acceleration.accessibilityLabel = "Множитель разгона"
+        acceleration.addAction(UIAction { [weak self, weak acceleration] _ in
+            MenuPreferences.shared.accelerationFactor = Double(acceleration?.value ?? 2)
+            accelerationLabel.text = String(format: "Множитель разгона: ×%.1f", MenuPreferences.shared.accelerationFactor); self?.onChange?()
+        }, for: .valueChanged)
+        pages[3].addArrangedSubview(accelerationLabel); pages[3].addArrangedSubview(acceleration)
+        pages[3].addArrangedSubview(toggle("Помощь при старте", key: "launchAssist"))
+        pages[3].addArrangedSubview(button("Launch Control", "launchActivate"))
+        pages[3].addArrangedSubview(toggle("Гидравлика · штатное управление", key: "vehicleHydraulics"))
+        pages[3].addArrangedSubview(button("Подброс авто", "hydraulicHop"))
+        pages[3].addArrangedSubview(button("Цвет авто", "vehicleColor"))
+        pages[3].addArrangedSubview(toggle("Стробоскоп фар", key: "vehicleStrobe"))
+        pages[3].addArrangedSubview(note("Разовый импульс скорости · 1–3"))
         let boost = UISlider(); boost.minimumValue = 1; boost.maximumValue = 3; boost.value = Float(MenuPreferences.shared.boostPower)
         boost.accessibilityLabel = "Сила ускорения транспорта"
         boost.addAction(UIAction { [weak boost] _ in MenuPreferences.shared.boostPower = Double(boost?.value ?? 1.5) }, for: .valueChanged)
         pages[3].addArrangedSubview(boost)
-        pages[3].addArrangedSubview(button("Ускорить транспорт", "boostVehicle"))
-        pages[3].addArrangedSubview(button("Применить выбранную массу к авто", "massVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить исходную массу", "massReset"))
-        pages[3].addArrangedSubview(button("Применить выбранную гравитацию к авто", "gravityVehicle"))
-        pages[3].addArrangedSubview(button("Восстановить гравитацию", "gravityReset"))
-        pages[3].addArrangedSubview(note("Защита действует в локальном обработчике урона; серверное бессмертие не гарантируется. Бесконечное нитро не подключено."))
+        pages[3].addArrangedSubview(button("Импульс", "boostVehicle"))
+        pages[3].addArrangedSubview(button("Масса авто", "massVehicle"))
+        pages[3].addArrangedSubview(button("Сброс массы", "massReset"))
+        pages[3].addArrangedSubview(button("Гравитация авто", "gravityVehicle"))
+        pages[3].addArrangedSubview(button("Сброс гравитации", "gravityReset"))
         selfStatus.numberOfLines = 0; selfStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); selfStatus.textColor = .systemCyan
         pages[4].addArrangedSubview(selfStatus)
-        pages[4].addArrangedSubview(button("Suicide · завершить жизнь персонажа", "suicide"))
-        pages[4].addArrangedSubview(button("Fast Respawn · появиться снова", "respawn"))
-        pages[4].addArrangedSubview(note("Пешком, после завершения смерти. Используются сохранённые сервером данные появления; сервер может отклонить респаун."))
-        pages[4].addArrangedSubview(toggle("NoAnim · пауза локальной анимации", key: "noAnim"))
+        pages[4].addArrangedSubview(button("Suicide", "suicide"))
+        pages[4].addArrangedSubview(button("Respawn", "respawn"))
+        pages[4].addArrangedSubview(toggle("Антифриз / Anti-Tazer", key: "antiFreeze"))
+        pages[4].addArrangedSubview(toggle("NoAnim · отключение анимаций", key: "noAnim"))
         pages[4].addArrangedSubview(toggle("Fast Anim · ускоренные анимации", key: "fastAnim"))
         let animationLabel = note(String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate))
         let animationRate = UISlider(); animationRate.minimumValue = 1; animationRate.maximumValue = 4
@@ -1005,40 +1318,83 @@ private final class MenuController: UIViewController {
             animationLabel.text = String(format: "Скорость анимаций: ×%.1f", MenuPreferences.shared.animationRate); self?.onChange?()
         }, for: .valueChanged)
         pages[4].addArrangedSubview(animationLabel); pages[4].addArrangedSubview(animationRate)
-        pages[4].addArrangedSubview(note("NoAnim имеет приоритет. Управление воспроизведением, без отмены задач сервера. Синхронизированные анимации могут игнорировать Fast Anim. При выключении исходная скорость восстанавливается."))
-        pages[4].addArrangedSubview(button("Сменить скин по ID", "skinSet"))
-        pages[4].addArrangedSubview(button("Вернуть исходный скин", "skinRestore"))
-        pages[4].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
-        pages[4].addArrangedSubview(toggle("Локальная защита от урона", key: "localProof"))
-        pages[4].addArrangedSubview(toggle("Защита от падения · эксперимент", key: "noFall"))
-        pages[4].addArrangedSubview(button("Восстановить HP", "heal"))
-        pages[4].addArrangedSubview(button("Восстановить броню", "armor"))
+        pages[4].addArrangedSubview(button("Скин по ID", "skinSet"))
+        pages[4].addArrangedSubview(button("Вернуть скин", "skinRestore"))
+        pages[4].addArrangedSubview(button("Выключить всё", "resetControls"))
+        pages[4].addArrangedSubview(toggle("Защита от урона", key: "localProof"))
+        pages[4].addArrangedSubview(toggle("Защита от падения", key: "noFall"))
+        pages[4].addArrangedSubview(button("Аптечка", "heal"))
+        pages[4].addArrangedSubview(button("Броня", "armor"))
+        pages[4].addArrangedSubview(toggle("Автоаптечка · команда сервера", key: "autoMedicine"))
+        pages[4].addArrangedSubview(button("Настроить", "medicineSettings"))
         pages[4].addArrangedSubview(toggle("Автовосстановление HP", key: "autoHealth"))
         pages[4].addArrangedSubview(toggle("Автовосстановление брони", key: "autoArmor"))
-        pages[4].addArrangedSubview(toggle("Выносливость · эксперимент", key: "stamina"))
-        pages[4].addArrangedSubview(note("HP/броня удерживаются не ниже 100. Это локальное восстановление, а не гарантия бессмертия. Выносливость — проверка предполагаемого поля; сравни показания до и во время спринта."))
+        pages[4].addArrangedSubview(toggle("Выносливость", key: "stamina"))
         weaponStatus.numberOfLines = 0; weaponStatus.font = .monospacedSystemFont(ofSize: 11, weight: .regular); weaponStatus.textColor = .systemCyan
         pages[5].addArrangedSubview(weaponStatus)
-        pages[5].addArrangedSubview(note("No Recoil пока не подключён: отдельный обработчик отдачи камеры не подтверждён."))
+        pages[5].addArrangedSubview(toggle("Заменить звук выстрела", key: "customShotSound"))
+        pages[5].addArrangedSubview(soundPicker(hit: false))
+        pages[5].addArrangedSubview(button("Прослушать", "shotPreview"))
+        pages[5].addArrangedSubview(button("Импорт", "shotImport"))
+        pages[5].addArrangedSubview(button("Сброс звука", "shotReset"))
+        pages[5].addArrangedSubview(toggle("Заменить звук попадания", key: "customHitSound"))
+        pages[5].addArrangedSubview(soundPicker(hit: true))
+        pages[5].addArrangedSubview(button("Прослушать", "hitPreview"))
+        pages[5].addArrangedSubview(button("Импорт", "hitImport"))
+        pages[5].addArrangedSubview(button("Сброс звука", "hitReset"))
         pages[5].addArrangedSubview(toggle("No Spread · убрать разброс", key: "noSpread"))
-        pages[5].addArrangedSubview(note("Убирает случайное отклонение пули. Параметры модели оружия общие внутри клиента; могут затронуть тот же тип у других персонажей локально. При выключении восстанавливаются."))
-        pages[5].addArrangedSubview(button("Выдать и выбрать оружие по ID", "weaponGive"))
-        pages[5].addArrangedSubview(note("Оружие выдаётся локально штатной функцией клиента. Стрельба использует обычное управление игры; серверные права не меняются."))
-        pages[5].addArrangedSubview(button("Пополнить запас патронов", "ammoRefill"))
-        pages[5].addArrangedSubview(button("Заполнить магазин из запаса", "magazineFill"))
+        pages[5].addArrangedSubview(button("Оружие по ID", "weaponGive"))
+        pages[5].addArrangedSubview(button("Патроны", "ammoRefill"))
+        pages[5].addArrangedSubview(button("Магазин", "magazineFill"))
         pages[5].addArrangedSubview(toggle("Бесконечный запас патронов", key: "infiniteAmmo"))
-        pages[5].addArrangedSubview(toggle("Без перезарядки · эксперимент", key: "noReload"))
+        pages[5].addArrangedSubview(toggle("Без перезарядки", key: "noReload"))
         pages[5].addArrangedSubview(toggle("Rapid Fire · скорострельность", key: "rapidFire"))
         let rateLabel = note(String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate)); pages[5].addArrangedSubview(rateLabel)
-        let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 5; fireRate.value = Float(MenuPreferences.shared.fireRate)
+        let fireRate = UISlider(); fireRate.minimumValue = 1; fireRate.maximumValue = 15; fireRate.value = Float(MenuPreferences.shared.fireRate)
         fireRate.accessibilityLabel = "Множитель скорострельности"
         fireRate.addAction(UIAction { [weak self, weak fireRate] _ in MenuPreferences.shared.fireRate = Double(fireRate?.value ?? 2); rateLabel.text = String(format: "Скорострельность: ×%.1f", MenuPreferences.shared.fireRate); self?.onChange?() }, for: .valueChanged)
         pages[5].addArrangedSubview(fireRate)
-        pages[5].addArrangedSubview(note("Только поддерживаемое огнестрельное оружие. Изменяются локальные счётчики и таймер; анимация и сервер могут ограничивать результат. Silent Aim — во вкладке Aim, для него нужна копия IPA v15. Triggerbot не подключён."))
-        pages[6].addArrangedSubview(toggle("Silent Aim · эксперимент", key: "silentAim"))
+        pages[5].addArrangedSubview(toggle("Увеличенный урон · экспериментальный", key: "extraDamage"))
+        pages[5].addArrangedSubview(note("Сервер может ограничивать множитель урона."))
+        let damageLabel = note(String(format: "Множитель урона: ×%.1f", MenuPreferences.shared.damageFactor))
+        let damage = UISlider(); damage.minimumValue = 1; damage.maximumValue = 5; damage.value = Float(MenuPreferences.shared.damageFactor)
+        damage.accessibilityLabel = "Множитель урона"
+        damage.addAction(UIAction { [weak self, weak damage] _ in
+            MenuPreferences.shared.damageFactor = Double(damage?.value ?? 2)
+            damageLabel.text = String(format: "Множитель урона: ×%.1f", MenuPreferences.shared.damageFactor); self?.onChange?()
+        }, for: .valueChanged)
+        pages[5].addArrangedSubview(damageLabel); pages[5].addArrangedSubview(damage)
+        pages[6].addArrangedSubview(toggle("Обычный Aim · поворот камеры", key: "regularAim"))
+        pages[6].addArrangedSubview(toggle("Aim: проверять препятствия", key: "regularAimVisible", fallback: true))
+        let smoothLabel = note(String(format: "Плавность Aim: %.0f мс", MenuPreferences.shared.aimSmooth * 1000))
+        let smooth = UISlider(); smooth.minimumValue = 0.02; smooth.maximumValue = 1; smooth.value = Float(MenuPreferences.shared.aimSmooth)
+        smooth.accessibilityLabel = "Плавность обычного Aim"
+        smooth.addAction(UIAction { [weak self, weak smooth] _ in
+            MenuPreferences.shared.aimSmooth = Double(smooth?.value ?? 0.2)
+            smoothLabel.text = String(format: "Плавность Aim: %.0f мс", MenuPreferences.shared.aimSmooth * 1000); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(smoothLabel); pages[6].addArrangedSubview(smooth)
+        pages[6].addArrangedSubview(toggle("TriggerBot", key: "triggerBot"))
+        pages[6].addArrangedSubview(toggle("TriggerBot только при прицеливании", key: "triggerAimOnly", fallback: true))
+        let triggerRadiusLabel = note(String(format: "Зона TriggerBot: %.0f pt", MenuPreferences.shared.triggerRadius))
+        let triggerRadius = UISlider(); triggerRadius.minimumValue = 2; triggerRadius.maximumValue = 30; triggerRadius.value = Float(MenuPreferences.shared.triggerRadius)
+        triggerRadius.accessibilityLabel = "Зона TriggerBot"
+        triggerRadius.addAction(UIAction { [weak self, weak triggerRadius] _ in
+            MenuPreferences.shared.triggerRadius = Double(triggerRadius?.value ?? 10)
+            triggerRadiusLabel.text = String(format: "Зона TriggerBot: %.0f pt", MenuPreferences.shared.triggerRadius); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(triggerRadiusLabel); pages[6].addArrangedSubview(triggerRadius)
+        let triggerDelayLabel = note(String(format: "Задержка TriggerBot: %.0f мс", MenuPreferences.shared.triggerDelay))
+        let triggerDelay = UISlider(); triggerDelay.minimumValue = 0; triggerDelay.maximumValue = 500; triggerDelay.value = Float(MenuPreferences.shared.triggerDelay)
+        triggerDelay.accessibilityLabel = "Задержка TriggerBot"
+        triggerDelay.addAction(UIAction { [weak self, weak triggerDelay] _ in
+            MenuPreferences.shared.triggerDelay = Double(triggerDelay?.value ?? 120)
+            triggerDelayLabel.text = String(format: "Задержка TriggerBot: %.0f мс", MenuPreferences.shared.triggerDelay); self?.onChange?()
+        }, for: .valueChanged)
+        pages[6].addArrangedSubview(triggerDelayLabel); pages[6].addArrangedSubview(triggerDelay)
+        pages[6].addArrangedSubview(toggle("Silent Aim", key: "silentAim"))
         aimStatus.numberOfLines = 0; aimStatus.font = .monospacedSystemFont(ofSize: 10, weight: .regular); aimStatus.textColor = .systemGreen
         pages[6].addArrangedSubview(aimStatus)
-        pages[6].addArrangedSubview(note("Нужен IPA с переходом v15 и эта dylib. Обычное огнестрельное оружие, пешком. Стены обрабатывает сама игра. Камера не поворачивается."))
         pages[6].addArrangedSubview(toggle("Точка: голова (выкл. — корпус)", key: "aimHead"))
         pages[6].addArrangedSubview(note("Радиус FOV в экранных точках"))
         let aimFOV = UISlider(); aimFOV.minimumValue = 30; aimFOV.maximumValue = 300; aimFOV.value = Float(MenuPreferences.shared.fovRadius)
@@ -1055,10 +1411,9 @@ private final class MenuController: UIViewController {
             MenuPreferences.shared.aimMiss = Double(miss?.value ?? 0)
             missLabel?.text = String(format: "Шанс пропуска наведения: %.0f%%", MenuPreferences.shared.aimMiss); self?.onChange?()
         }, for: .valueChanged); pages[6].addArrangedSubview(miss)
-        pages[6].addArrangedSubview(note("Пропуск оставляет исходное направление — обычный выстрел всё равно может попасть. HP ≤ 0 и штатные состояния DYING/DEAD всегда исключены. Особые серверные стадии ранения требуют проверки."))
-        pages[6].addArrangedSubview(button("Исключения: ID и ники", "aimWhitelist"))
-        pages[6].addArrangedSubview(button("Добавить текущую цель в исключения", "aimExcludeTarget"))
-        pages[6].addArrangedSubview(button("Очистить исключения", "aimClearWhitelist"))
+        pages[6].addArrangedSubview(button("Список исключений", "aimWhitelist"))
+        pages[6].addArrangedSubview(button("Добавить цель", "aimExcludeTarget"))
+        pages[6].addArrangedSubview(button("Очистить список", "aimClearWhitelist"))
         stretchLabel.font = .systemFont(ofSize: 11); stretchLabel.textColor = .secondaryLabel
         stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", MenuPreferences.shared.stretch)
         stretchSlider.minimumValue = 1; stretchSlider.maximumValue = 1.6
@@ -1069,14 +1424,62 @@ private final class MenuController: UIViewController {
             self.stretchLabel.text = String(format: "Масштаб 3D-проекции: ×%.2f", MenuPreferences.shared.stretch)
             self.onChange?()
         }, for: .valueChanged)
+        extensionStatus.numberOfLines = 0; extensionStatus.font = .systemFont(ofSize: 11); extensionStatus.textColor = .systemCyan
+        pages[7].addArrangedSubview(extensionStatus)
+        pages[7].addArrangedSubview(toggle("Fake Lag · синхронизация пешком", key: "fakeLag"))
+        let lagLabel = note(String(format: "Интервал синхронизации: %.0f мс", MenuPreferences.shared.lagInterval))
+        let lag = UISlider(); lag.minimumValue = 50; lag.maximumValue = 500; lag.value = Float(MenuPreferences.shared.lagInterval)
+        lag.accessibilityLabel = "Интервал Fake Lag"
+        lag.addAction(UIAction { [weak self, weak lag] _ in
+            MenuPreferences.shared.lagInterval = Double(lag?.value ?? 200)
+            lagLabel.text = String(format: "Интервал синхронизации: %.0f мс", MenuPreferences.shared.lagInterval); self?.onChange?()
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(lagLabel); pages[7].addArrangedSubview(lag)
+        pages[7].addArrangedSubview(toggle("Свой FOV камеры", key: "cameraFOVOverride"))
+        let cameraFOVLabel = note(String(format: "FOV камеры: %.0f°", MenuPreferences.shared.cameraFOV))
+        let cameraFOV = UISlider(); cameraFOV.minimumValue = 50; cameraFOV.maximumValue = 120; cameraFOV.value = Float(MenuPreferences.shared.cameraFOV)
+        cameraFOV.addAction(UIAction { [weak self, weak cameraFOV] _ in
+            MenuPreferences.shared.cameraFOV = Double(cameraFOV?.value ?? 70)
+            cameraFOVLabel.text = String(format: "FOV камеры: %.0f°", MenuPreferences.shared.cameraFOV); self?.onChange?()
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(cameraFOVLabel); pages[7].addArrangedSubview(cameraFOV)
+        pages[7].addArrangedSubview(toggle("Своё время суток", key: "worldTimeOverride"))
+        let hourLabel = note(String(format: "Часы: %.0f", MenuPreferences.shared.worldHour))
+        let hour = UISlider(); hour.minimumValue = 0; hour.maximumValue = 23; hour.value = Float(MenuPreferences.shared.worldHour)
+        hour.addAction(UIAction { [weak self, weak hour] _ in MenuPreferences.shared.worldHour = Double(hour?.value ?? 0); hourLabel.text = String(format: "Часы: %.0f", MenuPreferences.shared.worldHour); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(hourLabel); pages[7].addArrangedSubview(hour)
+        let minuteLabel = note(String(format: "Минуты: %.0f", MenuPreferences.shared.worldMinute))
+        let minute = UISlider(); minute.minimumValue = 0; minute.maximumValue = 59; minute.value = Float(MenuPreferences.shared.worldMinute)
+        minute.addAction(UIAction { [weak self, weak minute] _ in MenuPreferences.shared.worldMinute = Double(minute?.value ?? 0); minuteLabel.text = String(format: "Минуты: %.0f", MenuPreferences.shared.worldMinute); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(minuteLabel); pages[7].addArrangedSubview(minute)
+        pages[7].addArrangedSubview(toggle("Своя погода", key: "worldWeatherOverride"))
+        let weatherLabel = note(String(format: "Погода: ID %.0f", MenuPreferences.shared.worldWeather))
+        let weather = UISlider(); weather.minimumValue = 0; weather.maximumValue = 21; weather.value = Float(MenuPreferences.shared.worldWeather)
+        weather.addAction(UIAction { [weak self, weak weather] _ in MenuPreferences.shared.worldWeather = Double(weather?.value ?? 0); weatherLabel.text = String(format: "Погода: ID %.0f", MenuPreferences.shared.worldWeather); self?.onChange?() }, for: .valueChanged)
+        pages[7].addArrangedSubview(weatherLabel); pages[7].addArrangedSubview(weather)
+        let aspectPresets = UIStackView(); aspectPresets.spacing = 6; aspectPresets.distribution = .fillEqually
+        aspectPresets.addArrangedSubview(button("Обычный", "aspectOriginal"))
+        aspectPresets.addArrangedSubview(button("Планшет", "aspectTablet"))
+        aspectPresets.addArrangedSubview(button("Широкий", "aspectWide"))
+        pages[7].addArrangedSubview(aspectPresets)
         pages[7].addArrangedSubview(stretchLabel); pages[7].addArrangedSubview(stretchSlider)
         stretchStatus.font = .systemFont(ofSize: 10); stretchStatus.textColor = .systemOrange; stretchStatus.numberOfLines = 0
         pages[7].addArrangedSubview(stretchStatus)
-        pages[7].addArrangedSubview(button("Вернуть обычное изображение", "stretchReset"))
-        pages[7].addArrangedSubview(note("Изменяется соотношение сторон 3D-камеры. Окно игры и HUD не растягиваются за экран. Нужна IPA v17; в старой IPA функция не применяется."))
-        pages[7].addArrangedSubview(button("Отменить ожидающую подмену", "modelCancel"))
-        pages[7].addArrangedSubview(button("Выключить игровые функции", "resetControls"))
-        pages[7].addArrangedSubview(toggle("Плавающая кнопка BR", key: "bubble", fallback: true))
+        pages[7].addArrangedSubview(button("Сброс растяга", "stretchReset"))
+        pages[7].addArrangedSubview(toggle("Сокращения в чате", key: "aliasesAuto"))
+        pages[7].addArrangedSubview(button("Команда", "commandCompose"))
+        pages[7].addArrangedSubview(button("Сокращения", "commandAliases"))
+        pages[7].addArrangedSubview(toggle("Скрыть логотип сервера", key: "hideServerLogo"))
+        pages[7].addArrangedSubview(button("Очистить чат", "clearChat"))
+        pages[7].addArrangedSubview(toggle("Визуальный баланс", key: "visualBalance"))
+        pages[7].addArrangedSubview(button("Задать баланс", "visualBalanceSet"))
+        pages[7].addArrangedSubview(button("Отменить подмену", "modelCancel"))
+        pages[7].addArrangedSubview(toggle("Авто-МП · /gevent", key: "autoEvent"))
+        pages[7].addArrangedSubview(note("Вход по серверному объявлению о наборе с /gevent. Повторы игнорируются."))
+        pages[7].addArrangedSubview(toggle("FPS UP", key: "fpsUp"))
+        pages[7].addArrangedSubview(note("50% разрешения 3D, без сглаживания GLK, ESP и чамсов. При выключении настройки возвращаются."))
+        pages[7].addArrangedSubview(button("Выключить всё", "resetControls"))
+        pages[7].addArrangedSubview(toggle("Плавающая кнопка", key: "bubble", fallback: true))
         pages[7].addArrangedSubview(toggle("Анимации", key: "animations", fallback: true))
         pages[7].addArrangedSubview(toggle("Увеличенное меню", key: "large"))
         pages[7].addArrangedSubview(note("Прозрачность"))
@@ -1085,38 +1488,228 @@ private final class MenuController: UIViewController {
         opacity.addAction(UIAction { [weak self, weak opacity] _ in
             MenuPreferences.shared.opacity = CGFloat(opacity?.value ?? 1); self?.onChange?()
         }, for: .valueChanged); pages[7].addArrangedSubview(opacity)
-        let colors = UISegmentedControl(items: ["Лёд", "Огонь"]); colors.selectedSegmentIndex = MenuPreferences.shared.accentIndex
-        colors.addAction(UIAction { [weak self, weak colors] _ in
-            MenuPreferences.shared.accentIndex = colors?.selectedSegmentIndex ?? 0
-            self?.coordinates.textColor = MenuPreferences.shared.accent
-            self?.view.layer.borderColor = MenuPreferences.shared.accent.withAlphaComponent(0.35).cgColor
-            self?.onChange?()
-        }, for: .valueChanged); pages[7].addArrangedSubview(colors)
-        pages[7].addArrangedSubview(note("Перетаскивай меню за заголовок, BR — за кнопку. Открыть или скрыть: два касания тремя пальцами. Настройки сохраняются."))
-        bubble.setTitle("BR", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
-        bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Развернуть диагностику"
+        pages[7].addArrangedSubview(note("Цвет темы"))
+        for start in stride(from: 0, to: MenuPreferences.palette.count, by: 3) {
+            let row = UIStackView(); row.spacing = 6; row.distribution = .fillEqually
+            for index in start..<min(start+3, MenuPreferences.palette.count) {
+                let item = MenuPreferences.palette[index], swatch = UIButton(type: .system)
+                var config = UIButton.Configuration.tinted(); config.title = item.0; config.baseForegroundColor = item.1; swatch.configuration = config
+                swatch.accessibilityIdentifier = "diagnostics.color.\(index)"
+                swatch.addAction(UIAction { [weak self] _ in
+                    MenuPreferences.shared.accentIndex = index; self?.applyTheme(); self?.onChange?()
+                }, for: .touchUpInside); row.addArrangedSubview(swatch)
+            }
+            pages[7].addArrangedSubview(row)
+        }
+        let customColor = UIColorWell(); customColor.title = "Свой цвет темы"; customColor.supportsAlpha = false
+        customColor.selectedColor = MenuPreferences.shared.accent; customColor.accessibilityLabel = "Свой цвет темы"
+        customColor.addAction(UIAction { [weak self, weak customColor] _ in
+            if let color = customColor?.selectedColor { MenuPreferences.shared.setCustomAccent(color); self?.applyTheme(); self?.onChange?() }
+        }, for: .valueChanged)
+        pages[7].addArrangedSubview(customColor)
+        compactPages26()
+        bubble.setTitle("RM", for: .normal); bubble.titleLabel?.font = .boldSystemFont(ofSize: 19); bubble.tintColor = .systemCyan
+        bubble.accessibilityIdentifier = "diagnostics.expand"; bubble.accessibilityLabel = "Открыть React Modifications"
         bubble.addAction(UIAction { [weak self] _ in self?.onAction?("collapse") }, for: .touchUpInside)
         bubble.addGestureRecognizer(UIPanGestureRecognizer(target: self, action: #selector(drag(_:))))
         bubble.translatesAutoresizingMaskIntoConstraints = false; view.addSubview(bubble)
         NSLayoutConstraint.activate([bubble.leadingAnchor.constraint(equalTo: view.leadingAnchor), bubble.trailingAnchor.constraint(equalTo: view.trailingAnchor), bubble.topAnchor.constraint(equalTo: view.topAnchor), bubble.bottomAnchor.constraint(equalTo: view.bottomAnchor)])
         showPage(nil); applyCollapse()
     }
+
+    // Reparent existing controls; their callbacks, defaults and values stay intact.
+    private func contains26(_ view: UIView, _ key: String) -> Bool {
+        view.accessibilityIdentifier == "diagnostics." + key || view.subviews.contains { contains26($0, key) }
+    }
+    private func detach26(_ view: UIView, from stack: UIStackView) {
+        stack.removeArrangedSubview(view); view.removeFromSuperview()
+    }
+    private func paired26(_ views: [UIView]) -> [UIView] {
+        var result: [UIView] = [], pending: [UIView] = []
+        func flush() {
+            guard !pending.isEmpty else { return }
+            if pending.count == 1 { result.append(pending[0]) }
+            else {
+                let row = UIStackView(arrangedSubviews: pending); row.spacing = 6; row.distribution = .fillEqually
+                result.append(row)
+            }
+            pending.removeAll()
+        }
+        for view in views {
+            if let button = view as? UIButton, !button.showsMenuAsPrimaryAction {
+                if var config = button.configuration {
+                    config.titleLineBreakMode = .byWordWrapping
+                    config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { attributes in
+                        var value = attributes; value.font = .systemFont(ofSize: 14, weight: .medium); return value
+                    }
+                    button.configuration = config
+                }
+                pending.append(button); if pending.count == 2 { flush() }
+            } else { flush(); result.append(view) }
+        }
+        flush(); return result
+    }
+    private func settings26(_ page: Int, key: String, title: String, ranges: [(String, String?, Bool)]) {
+        let stack = pages[page], original = stack.arrangedSubviews
+        guard let primary = original.first(where: { contains26($0, key) }) else { return }
+        var chosen = Set<ObjectIdentifier>()
+        for (start, end, includeStart) in ranges {
+            guard let a = original.firstIndex(where: { contains26($0, start) }) else { continue }
+            let b = end.flatMap { value in original.firstIndex(where: { contains26($0, value) }) } ?? original.count
+            let first = a + (includeStart ? 0 : 1)
+            if first < b { for view in original[first..<b] where view !== primary { chosen.insert(ObjectIdentifier(view)) } }
+        }
+        let detail = original.filter { chosen.contains(ObjectIdentifier($0)) }
+        guard !detail.isEmpty, let index = stack.arrangedSubviews.firstIndex(of: primary) else { return }
+        detach26(primary, from: stack); detail.forEach { detach26($0, from: stack) }
+        let body = UIStackView(); body.axis = .vertical; body.spacing = 6; body.isHidden = true
+        body.isLayoutMarginsRelativeArrangement = true; body.directionalLayoutMargins = .init(top: 4, leading: 8, bottom: 8, trailing: 8)
+        for view in paired26(detail) { body.addArrangedSubview(view) }
+        let gear = UIButton(type: .system); gear.setImage(UIImage(systemName: "gearshape"), for: .normal)
+        gear.accessibilityIdentifier = "diagnostics.settings." + key; gear.accessibilityLabel = "Настройки: " + title
+        gear.widthAnchor.constraint(equalToConstant: 44).isActive = true; gear.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        gear.addAction(UIAction { [weak self, weak body] _ in
+            self?.onAction?("flightRelease"); body?.isHidden.toggle(); self?.refreshSections26()
+        }, for: .touchUpInside)
+        let row = UIStackView(arrangedSubviews: [primary, gear]); row.spacing = 4; row.alignment = .center
+        let wrapper = UIStackView(arrangedSubviews: [row, body]); wrapper.axis = .vertical; wrapper.spacing = 0
+        stack.insertArrangedSubview(wrapper, at: index)
+        disclosures26.append((gear, body, title))
+    }
+    private func section26(_ page: Int, key: String, title: String, views: [UIView], open: Bool = false) -> UIView {
+        let body = UIStackView(); body.axis = .vertical; body.spacing = 6; body.isHidden = !open
+        body.isLayoutMarginsRelativeArrangement = true; body.directionalLayoutMargins = .init(top: 4, leading: 8, bottom: 8, trailing: 8)
+        for view in paired26(views) { body.addArrangedSubview(view) }
+        let header = UIButton(type: .system)
+        header.accessibilityIdentifier = "diagnostics.group." + key
+        header.accessibilityLabel = title
+        header.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        header.addAction(UIAction { [weak self, weak body] _ in
+            self?.onAction?("flightRelease"); body?.isHidden.toggle(); self?.refreshSections26()
+        }, for: .touchUpInside)
+        let card = UIStackView(arrangedSubviews: [header, body]); card.axis = .vertical; card.spacing = 0
+        card.backgroundColor = UIColor.white.withAlphaComponent(0.035); card.layer.cornerRadius = 12; card.clipsToBounds = true
+        sections26.append((header, body, title)); return card
+    }
+    private func group26(_ page: Int, plan: [(String, String, String, Bool)]) {
+        let stack = pages[page], original = stack.arrangedSubviews
+        let starts = plan.compactMap { item -> (Int, String, String, Bool)? in
+            guard let index = original.firstIndex(where: { contains26($0, item.2) }) else { return nil }
+            return (index, item.0, item.1, item.3)
+        }
+        guard !starts.isEmpty else { return }
+        for view in original { detach26(view, from: stack) }
+        for view in paired26(Array(original.prefix(starts[0].0))) { stack.addArrangedSubview(view) }
+        for (i, item) in starts.enumerated() {
+            let end = i + 1 < starts.count ? starts[i+1].0 : original.count
+            guard item.0 < end else { continue }
+            stack.addArrangedSubview(section26(page, key: item.1, title: item.2, views: Array(original[item.0..<end]), open: item.3))
+        }
+    }
+    private func refreshSections26() {
+        for (gear, body, _) in disclosures26 {
+            gear.isSelected = !body.isHidden
+            gear.accessibilityValue = body.isHidden ? "Закрыто" : "Открыто"
+            gear.tintColor = body.isHidden ? .secondaryLabel : MenuPreferences.shared.accent
+        }
+        func active(_ view: UIView) -> Int {
+            (view as? UISwitch).map { $0.isOn ? 1 : 0 } ?? view.subviews.reduce(0) { $0 + active($1) }
+        }
+        for (header, body, title) in sections26 {
+            let count = active(body)
+            var config = UIButton.Configuration.plain(); config.title = title
+            config.subtitle = count > 0 ? "Включено: \(count)" : nil
+            config.image = UIImage(systemName: body.isHidden ? "chevron.right" : "chevron.down")
+            config.imagePadding = 8; config.baseForegroundColor = MenuPreferences.shared.accent
+            config.contentInsets = .init(top: 8, leading: 10, bottom: 8, trailing: 10)
+            header.configuration = config; header.contentHorizontalAlignment = .leading
+            header.accessibilityValue = body.isHidden ? "Закрыто" : "Открыто"
+        }
+    }
+    private func compactPages26() {
+        settings26(1, key: "chams", title: "Чамсы", ranges: [("chams", "espName", false)])
+        settings26(1, key: "esp", title: "ESP", ranges: [("esp", "chams", false), ("espName", "hud", true)])
+        settings26(2, key: "runSpeed", title: "Скорость бега", ranges: [("runSpeed", "flightStatus", false)])
+        settings26(2, key: "flightToggle", title: "AirBrake", ranges: [("flightToggle", "waypoint", false)])
+        settings26(3, key: "vehicleAcceleration", title: "Разгон", ranges: [("vehicleAcceleration", "launchAssist", false)])
+        settings26(4, key: "fastAnim", title: "Анимации", ranges: [("fastAnim", "skinSet", false)])
+        settings26(5, key: "customShotSound", title: "Звук выстрела", ranges: [("customShotSound", "customHitSound", false)])
+        settings26(5, key: "customHitSound", title: "Звук попадания", ranges: [("customHitSound", "noSpread", false)])
+        settings26(5, key: "rapidFire", title: "Rapid Fire", ranges: [("rapidFire", "extraDamage", false)])
+        settings26(5, key: "extraDamage", title: "Урон", ranges: [("extraDamage", nil, false)])
+        settings26(6, key: "regularAim", title: "Обычный Aim", ranges: [("regularAim", "triggerBot", false)])
+        settings26(6, key: "triggerBot", title: "TriggerBot", ranges: [("triggerBot", "silentAim", false)])
+        settings26(6, key: "silentAim", title: "Silent Aim", ranges: [("silentAim", nil, false)])
+        settings26(7, key: "fakeLag", title: "Fake Lag", ranges: [("fakeLag", "cameraFOVOverride", false)])
+        settings26(7, key: "cameraFOVOverride", title: "Камера", ranges: [("cameraFOVOverride", "worldTimeOverride", false)])
+        settings26(7, key: "worldTimeOverride", title: "Время суток", ranges: [("worldTimeOverride", "worldWeatherOverride", false)])
+        // Weather parameters stop before the separate aspect-ratio controls.
+        let weatherPage = pages[7].arrangedSubviews
+        if let aspect = weatherPage.first(where: { contains26($0, "aspectOriginal") }) { aspect.accessibilityIdentifier = "diagnostics.aspectControls" }
+        settings26(7, key: "worldWeatherOverride", title: "Погода", ranges: [("worldWeatherOverride", "aspectControls", false)])
+        group26(1, plan: [("hud", "Экран и HUD", "hud", false)])
+        group26(2, plan: [("movement", "Передвижение", "runSpeed", true), ("teleports", "Телепорты", "waypoint", false), ("impulses", "Прыжки и вода", "hopHeading", false), ("physics", "Масса и гравитация", "massHeading", false)])
+        group26(3, plan: [("vehicleAccess", "Доступ и модель", "unlockVehicle", true), ("vehicleCare", "Ремонт и защита", "stopVehicle", false), ("vehicleTuning", "Разгон и тюнинг", "vehicleAcceleration", false)])
+        group26(4, plan: [("animations", "Анимации", "antiFreeze", true), ("appearance", "Скин и сброс", "skinSet", false), ("health", "Здоровье и защита", "localProof", false)])
+        group26(5, plan: [("sounds", "Звуки", "customShotSound", false), ("weapons", "Стрельба и патроны", "noSpread", true)])
+        // Put frequently used weapon controls before the sound settings.
+        let weaponCards = pages[5].arrangedSubviews
+        if weaponCards.count == 3 { let sounds = weaponCards[1]; detach26(sounds, from: pages[5]); pages[5].addArrangedSubview(sounds) }
+        group26(7, plan: [("world", "Мир и камера", "cameraFOVOverride", false), ("chat", "Чат и сервис", "aliasesAuto", false), ("performance", "Производительность", "fpsUp", false), ("appearanceMenu", "Оформление меню", "bubble", false)])
+        refreshSections26()
+    }
+
+    private func soundPicker(hit: Bool) -> UIButton {
+        let kind = hit ? "hit" : "shot", picker = UIButton(type: .system)
+        picker.accessibilityIdentifier = "diagnostics.\(kind)Presets"
+        func refresh() {
+            var config = UIButton.Configuration.tinted()
+            config.title = "Звук: " + ReactSound25.names[ReactSound25.selected(kind)]
+            config.baseForegroundColor = MenuPreferences.shared.accent; picker.configuration = config
+            picker.menu = UIMenu(children: ReactSound25.names.enumerated().map { index, name in
+                UIAction(title: name, state: index == ReactSound25.selected(kind) ? .on : .off) { [weak self, weak picker] action in
+                    picker?.menu?.children.compactMap { $0 as? UIAction }.forEach { $0.state = $0 === action ? .on : .off }
+                    self?.onAction?("\(kind)Preset.\(index)")
+                    if let picker { var config = picker.configuration; config?.title = "Звук: " + name; picker.configuration = config }
+                }
+            })
+        }
+        refresh();picker.showsMenuAsPrimaryAction = true
+        picker.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        return picker
+    }
     private func note(_ text: String) -> UILabel {
         let label = UILabel(); label.text = text; label.numberOfLines = 0; label.textColor = .secondaryLabel; label.font = .systemFont(ofSize: 12); return label
     }
     private func toggle(_ title: String, key: String, fallback: Bool = false) -> UIView {
         let row = UIStackView(); row.spacing = 12; row.alignment = .center
-        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 48).isActive = true
-        let label = note(title); label.font = .systemFont(ofSize: 15, weight: .medium); label.textColor = .white; label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
+        let label = note(title); label.font = .systemFont(ofSize: 14, weight: .medium); label.textColor = .white; label.setContentHuggingPriority(.defaultLow, for: .horizontal)
         let control = UISwitch(); control.isOn = MenuPreferences.shared.flag(key, fallback: fallback)
         control.accessibilityIdentifier = "diagnostics.\(key)"; control.accessibilityLabel = title
         control.onTintColor = MenuPreferences.shared.accent
         control.addAction(UIAction { [weak self, weak control] _ in
             MenuPreferences.shared.set(key, control?.isOn ?? false)
             if key == "bubble" { self?.showBubble = control?.isOn ?? true }
-            self?.onChange?()
+            self?.refreshSections26(); self?.onChange?()
         }, for: .valueChanged)
         row.addArrangedSubview(label); row.addArrangedSubview(control); return row
+    }
+    func applyTheme() {
+        let accent = MenuPreferences.shared.accent
+        blur.isHidden = MenuPreferences.shared.flag("fpsUp")
+        view.tintColor = accent; coordinates.textColor = accent; bubble.tintColor = accent
+        view.layer.borderColor = accent.withAlphaComponent(0.35).cgColor
+        func visit(_ root: UIView) {
+            if let control = root as? UISwitch { control.onTintColor = accent }
+            if let slider = root as? UISlider { slider.minimumTrackTintColor = accent }
+            if let button = root as? UIButton, button.accessibilityIdentifier?.hasPrefix("diagnostics.color.") != true {
+                var config = button.configuration; config?.baseForegroundColor = accent; button.configuration = config; button.tintColor = accent
+            }
+            root.subviews.forEach { visit($0) }
+        }
+        visit(view)
+        refreshSections26()
     }
     func syncControlToggles() {
         func visit(_ view: UIView) {
@@ -1127,6 +1720,7 @@ private final class MenuController: UIViewController {
             for child in view.subviews { visit(child) }
         }
         visit(view)
+        refreshSections26()
     }
     private func showPage(_ selected: Int?) {
         onAction?("flightRelease"); selectedPage = selected
@@ -1134,7 +1728,7 @@ private final class MenuController: UIViewController {
         pageTitle.text = selected.map { categoryTitles[$0] }
         for (index, page) in pages.enumerated() { page.isHidden = index != selected }
         scroll.setContentOffset(.zero, animated: false)
-        if MenuPreferences.shared.animations && !UIAccessibility.isReduceMotionEnabled {
+        if MenuPreferences.shared.animations && !MenuPreferences.shared.flag("fpsUp") && !UIAccessibility.isReduceMotionEnabled {
             content.alpha = 0; UIView.animate(withDuration: 0.18) { self.content.alpha = 1 }
         }
     }
@@ -1159,6 +1753,7 @@ private final class MenuController: UIViewController {
     }
     func applyCollapse() {
         for subview in view.subviews where subview !== blur && subview !== bubble { subview.isHidden = collapsed }
+        blur.isHidden = MenuPreferences.shared.flag("fpsUp")
         bubble.isHidden = !collapsed
     }
     func refreshLog() {
@@ -1183,3 +1778,50 @@ private final class PassthroughWindow: UIWindow {
         return super.hitTest(point, with: event)
     }
 }
+
+
+
+/// Played only after the verified native audio event is suppressed.
+@MainActor
+private final class ReactShotAudio {
+    private let kind: String
+    init(kind: String) { self.kind = kind }
+    private var players: [AVAudioPlayer] = []
+    private var cached: Data?
+    private var root: URL {
+        (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory).appendingPathComponent("ReactModifications", isDirectory: true)
+    }
+    private var file: URL { root.appendingPathComponent(kind + ".audio") }
+    private enum ImportError: Error { case invalid }
+    func importFile(_ url: URL) throws {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values.isRegularFile == true, let size = values.fileSize, size > 0, size <= 1_048_576 else { throw ImportError.invalid }
+        let data = try Data(contentsOf: url)
+        guard data.count <= 1_048_576 else { throw ImportError.invalid }
+        let check = try AVAudioPlayer(data: data)
+        guard check.duration.isFinite, check.duration > 0, check.duration <= 2, check.numberOfChannels <= 2 else { throw ImportError.invalid }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try data.write(to: file, options: .atomic)
+        stop(); cached = data
+    }
+    func reset() { selectPreset(kind == "hit" ? 1 : 0) }
+    func selectPreset(_ index: Int) { stop(); ReactSound25.select(index, kind: kind); try? FileManager.default.removeItem(at: file); cached = ReactSound25.wave(ReactSound25.selected(kind)) }
+    func stop() { players.forEach { $0.stop() }; players.removeAll() }
+    func play() {
+        if cached == nil { cached = (try? Data(contentsOf: file)) ?? ReactSound25.wave(ReactSound25.selected(kind)) }
+        guard let data = cached else { return }
+        if players.isEmpty {
+            players = (0..<4).compactMap { _ in try? AVAudioPlayer(data: data) }
+            players.forEach { $0.volume = 0.7; $0.prepareToPlay() }
+        }
+        guard let player = players.first(where: { !$0.isPlaying }) ?? players.first else { return }
+        player.currentTime = 0; player.play()
+    }
+
+}
+
+
+

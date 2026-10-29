@@ -6,6 +6,14 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSDictionary<NSString *, id> *)aspectState;
 + (void)configureAim:(NSDictionary<NSString *, id> *)settings NS_SWIFT_NAME(configureAim(_:));
 + (NSDictionary<NSString *, id> *)aimFrame:(double)width height:(double)height stretch:(double)stretch NS_SWIFT_NAME(aimFrame(width:height:stretch:));
++ (BOOL)clearChatForController:(NSObject *)controller NS_SWIFT_NAME(clearChat(forController:));
++ (NSString *)extensionStatus;
++ (void)configureChatAliases:(NSDictionary<NSString *,NSString *> *)rules NS_SWIFT_NAME(configureChatAliases(_:));
++ (NSString *)sendChatCommand:(NSString *)command NS_SWIFT_NAME(sendChatCommand(_:));
++ (uint64_t)ownShotCount;
++ (void)configureMedicine:(NSString *)command threshold:(double)threshold interval:(double)interval enabled:(BOOL)enabled NS_SWIFT_NAME(configureMedicine(_:threshold:interval:enabled:));
++ (void)tickVisuals;
++ (BOOL)clearNativeChat;
 + (NSString *)status;
 + (NSArray<NSNumber *> *)projectionMatrix;
 + (void)tickControls:(double)elapsed;
@@ -15,3 +23,5 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)performAction:(NSString *)action values:(NSDictionary<NSString *, NSNumber *> *)values NS_SWIFT_NAME(perform(action:values:));
 @end
 NS_ASSUME_NONNULL_END
+
+

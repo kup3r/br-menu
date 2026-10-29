@@ -22,8 +22,8 @@ template<class T> bool read(uint64_t address,T &v) {for(size_t i=0;i<sizeof(T);+
 template<class T> bool writeData(uint64_t address,const T &v) {for(size_t i=0;i<sizeof(T);++i)memory[address+i]=reinterpret_cast<const uint8_t *>(&v)[i];return true;}
 template<class T> T value(uint64_t a){T v{};assert(read(a,v));return v;}
 struct Local {uint64_t base=0,ped=0,local=0;uint16_t id=0;};
-struct Weapon {uint64_t info=0;uint8_t id=0;};
-struct {bool noSpread=false,noAnim=false,fastAnim=false;double animationRate=2;} assists;
+struct Weapon {uint64_t info=0;uint8_t id=0;int state=0,clip=1;};
+struct {bool noSpread=false,noAnim=false,fastAnim=false,rapid=false;double animationRate=2,fireRate=3;} assists;
 Weapon currentWeapon; bool valid=true,weaponValid=true;uint64_t definition=0;
 bool sameLocal(const Local &){return valid;}
 bool getWeapon(const Local &,Weapon &w){w=currentWeapon;return weaponValid;}
@@ -54,6 +54,11 @@ int main(){
  assists.noAnim=true;updateAnimations(s);writeData(s.ped+0x4b0,0.f);updateAnimations(s);
  assert(value<float>(node+0x34)==.5f); // death releases pause
  assists.noAnim=false;writeData(node,node);updateAnimations(s); // cyclic list terminates
+ writeData(s.ped+0x4b0,100.f);writeData(node,uint64_t(0));writeData(node+0x40,int16_t(0xf8));writeData(node+0x34,1.f);
+ assists.rapid=true;updateAnimations(s);assert(value<float>(node+0x34)==3);
+ updateAnimations(s);assert(value<float>(node+0x34)==3); // no accumulation
+ currentWeapon.state=2;updateAnimations(s);assert(value<float>(node+0x34)==1); // reload is not accelerated
+ currentWeapon.state=0;assists.rapid=false;
  std::cout<<"Production control backup/restore tests passed\n";
 }
 '''
@@ -61,3 +66,4 @@ with tempfile.TemporaryDirectory() as directory:
  cpp=Path(directory)/'controls.cpp';binary=Path(directory)/'controls';cpp.write_text(pre+functions+test)
  subprocess.run([os.environ.get('CXX','c++'),'-std=c++17','-O2','-Wall','-Wextra','-Werror',str(cpp),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)
+

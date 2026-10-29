@@ -1,0 +1,118 @@
+name: Test Telegram licensing and build licensed client
+on:
+  pull_request:
+    paths:
+      - 'licensing/**'
+      - 'Inject/LicenseGate.swift'
+      - 'Sources/DiagnosticMenu/**'
+      - 'Inject/BRMenuEntry.swift'
+      - 'Inject/PlayerSnapshot.*'
+      - 'Inject/*24*'
+      - 'Inject/*25*'
+      - 'Inject/ReactPolicies.hpp'
+      - 'scripts/*client19*'
+      - 'scripts/*client20*'
+      - 'scripts/*client21*'
+      - 'scripts/*24*'
+      - 'scripts/*25*'
+      - 'scripts/react_policy_tests.cpp'
+      - 'scripts/command_alias_tests.swift'
+      - 'scripts/build_dylib.sh'
+      - 'scripts/license_config.py'
+      - '.github/workflows/licensing.yml'
+  workflow_dispatch:
+    inputs:
+      license_api_url:
+        description: 'Public HTTPS license server URL (empty = live React server)'
+        required: false
+        type: string
+      license_bot_url:
+        description: 'Telegram bot URL (empty = ReactSellerBot)'
+        required: false
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: licenses-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: license_test
+          POSTGRES_PASSWORD: test_password_only
+          POSTGRES_DB: license_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    defaults:
+      run:
+        working-directory: licensing
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: licensing/requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Test SQLite fixtures and Telegram handlers
+        run: python -m pytest -q
+      - name: Test PostgreSQL locks, duplicate payments and device races
+        env:
+          TEST_DATABASE_URL: postgresql+asyncpg://license_test:test_password_only@localhost:5432/license_test
+        run: python -m pytest -q
+  licensed-client:
+    needs: backend
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test native override bounds and bridge layout
+        run: |
+          clang++ -std=c++17 -O2 -Wall -Wextra -Werror scripts/react_policy_tests.cpp -o /tmp/react-policy-tests
+          /tmp/react-policy-tests
+          python3 scripts/local_vehicle_state_tests.py
+          python3 scripts/check_client19.py
+          python3 scripts/check_client20.py
+          python3 scripts/check_client21.py
+          python3 scripts/check_client24.py
+          CXX=clang++ python3 scripts/visual_controls24_tests.py
+          CXX=clang++ python3 scripts/event25_buffer_tests.py
+          python3 -m venv /tmp/react-adapter-tests
+          /tmp/react-adapter-tests/bin/pip install unicorn==2.1.4
+          /tmp/react-adapter-tests/bin/python scripts/test_client20_adapters.py
+          /tmp/react-adapter-tests/bin/python scripts/test_client21_adapters.py
+          /tmp/react-adapter-tests/bin/python scripts/test_client24_adapter.py
+          /tmp/react-adapter-tests/bin/python scripts/test_client25_adapter.py
+      - name: Test command expansion and argument preservation
+        run: |
+          swiftc Sources/DiagnosticMenu/ReactCommands.swift scripts/command_alias_tests.swift -o /tmp/react-command-tests
+          /tmp/react-command-tests
+      - name: Test auto-event policy and generated sound bank
+        run: |
+          swiftc Sources/DiagnosticMenu/ReactEvent25.swift scripts/event25_tests.swift -o /tmp/event25-tests
+          /tmp/event25-tests
+          swiftc Sources/DiagnosticMenu/ReactSound25.swift scripts/sound25_tests.swift -o /tmp/sound25-tests
+          /tmp/sound25-tests
+      - name: Build licensed menu for the live key server
+        env:
+          BRMENU_LICENSED: '1'
+          BRMENU_LICENSE_API_URL: ${{ inputs.license_api_url || 'https://br-license-bot.onrender.com' }}
+          BRMENU_LICENSE_BOT_URL: ${{ inputs.license_bot_url || 'https://t.me/ReactSellerBot' }}
+        run: bash scripts/build_dylib.sh
+      - name: Publish configured client only
+        if: ${{ github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: BRMenu-Licensed
+          path: |
+            dist/BRMenuInject.dylib
+            dist/BRMenuInject-SHA256.txt
+          retention-days: 7
+
+
+
+
